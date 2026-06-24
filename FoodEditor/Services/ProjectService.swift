@@ -68,10 +68,17 @@ final class ProjectService {
         adopt(loaded.meta)
         Log.app("📂 Resumed \(loaded.meta.name) [\(loaded.meta.status.rawValue)] — \(loaded.state.order.count) clips.")
 
+        // Resume into the editor shell at the stage matching how far the project got. Set the
+        // high-water mark first so the StageSwitcher shows the right ✓ marks (editorStage's didSet only
+        // ever raises furthestStage, so this order is safe).
         switch loaded.meta.status {
-        case .triage:               return .triage
-        case .polishing, .exported: return .timeline
+        case .triage:
+            session.editorStage = .sort
+        case .polishing, .exported:
+            session.furthestStage = .polish
+            session.editorStage = .arrange
         }
+        return .editor
     }
 
     // MARK: - Save

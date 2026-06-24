@@ -3,6 +3,10 @@ import UIKit
 
 private enum TriageAction { case keep, cut, hook, broll }
 
+/// A clip's current standing in the live edit — drives the synced Sort card's styling so the deck
+/// reflects exactly what Arrange/Polish show (hook outlined, B-roll tinted, cut dimmed).
+enum ClipStatus { case hook, broll, cut, normal }
+
 /// Ochre accent for the B-roll action (distinct from cut's terracotta and keep's sage).
 private let veBrollTone = Color(hex: 0x9A7350)
 
@@ -82,7 +86,6 @@ private enum AIVerdict {
 /// The front card auto-plays its slice (with sound) so you watch before deciding; an Autoplay toggle
 /// turns that off. Each action gives visual + haptic feedback and mutates the shared `EditPlanStore`.
 struct TriageView: View {
-    @Environment(AppRouter.self) private var router
     @Environment(VideoSession.self) private var session
 
     @State private var triageIndex = 0
@@ -92,15 +95,64 @@ struct TriageView: View {
     @State private var previewSegment: Segment?
     @State private var autoPlay = true
     @State private var flash: TriageAction?
+    /// The deck order, **frozen on appear** (see `buildDeck`). Derived from the live edit so Sort shows
+    /// the current cut — but captured once so swiping (which mutates the store) can't reshuffle mid-pass.
+    @State private var deckIds: [Int] = []
 
     private var store: EditPlanStore? { session.store }
     private var proxyURL: URL? { session.merged?.url }
 
+    /// The live edit order as segment ids: main spine (deduped, in play order) → B-roll pool → cut tray.
+    /// Used for the first render; then frozen into `deckIds`.
+    private var liveDeckIds: [Int] {
+        guard let store else { return [] }
+        var seen = Set<Int>(); var ids: [Int] = []
+        for c in store.order where seen.insert(c.sourceSegmentId).inserted { ids.append(c.sourceSegmentId) }
+        for id in store.brollClips where seen.insert(id).inserted { ids.append(id) }
+        for id in store.cutTray where seen.insert(id).inserted { ids.append(id) }
+        return ids
+    }
+
     private var queue: [Segment] {
-        (store?.plan.segments ?? []).sorted { $0.startSeconds < $1.startSeconds }
+        (deckIds.isEmpty ? liveDeckIds : deckIds).compactMap { store?.segment($0) }
     }
     private var isDone: Bool { triageIndex >= queue.count }
     private var currentSegment: Segment? { isDone ? nil : queue[triageIndex] }
+
+    /// Freeze the deck order from the current edit. Called on appear so the deck is stable for the swipe
+    /// session while each card still reflects live status/range.
+    private func buildDeck() {
+        deckIds = liveDeckIds
+        if triageIndex > deckIds.count { triageIndex = deckIds.count }
+    }
+
+    /// Restore a cut clip and make it the **front card** so the user can immediately re-edit it. The clip
+    /// goes back onto the spine (Kept) and is inserted at the current `triageIndex`, so restoring several
+    /// in a row stacks them newest-first (C, B, A) ahead of the previously-current card. The Cut Tray
+    /// stays open (the row just leaves `cutTray`) so multiple clips can be restored in one pass.
+    private func restoreToFront(_ id: Int) {
+        store?.restore(id)
+        deckIds.removeAll { $0 == id }
+        deckIds.insert(id, at: min(triageIndex, deckIds.count))
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    /// The clip's live in/out range (honoring trims) when it's on the spine; else the segment's bounds.
+    private func range(_ segId: Int) -> (start: Double, end: Double) {
+        if let clip = store?.order.first(where: { $0.sourceSegmentId == segId }) {
+            return (clip.inPoint, clip.outPoint)
+        }
+        let s = store?.segment(segId)
+        return (s?.startSeconds ?? 0, s?.trimToSeconds ?? s?.endSeconds ?? 0)
+    }
+
+    /// The clip's current standing in the edit (drives card styling).
+    private func status(_ segId: Int) -> ClipStatus {
+        if store?.hookId == segId { return .hook }
+        if store?.brollClips.contains(segId) == true { return .broll }
+        if store?.cutTray.contains(segId) == true { return .cut }
+        return .normal
+    }
 
     /// Whether the inline front-card player should be running (paused while a sheet covers it).
     private var playerActive: Bool { previewSegment == nil && !showCutTray }
@@ -108,9 +160,10 @@ struct TriageView: View {
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
-                topBar
                 progressHeader
-                if !isDone { acceptPicksBanner }
+                // The AI-reset shortcut only on the very first pass — once you've edited, hide it so a
+                // stray tap can't wipe your work ("Re-sort everything" is the deliberate path for that).
+                if !isDone && session.furthestStage == .sort { acceptPicksBanner }
                 deck
                 actionButtons
                 bottomRow
@@ -119,32 +172,14 @@ struct TriageView: View {
             if showCutTray { cutTraySheet }
         }
         .background(Color.veCream.ignoresSafeArea())
+        .onAppear(perform: buildDeck)
         .task { await loadThumbnails() }
         .sheet(item: $previewSegment) { seg in
             if let proxyURL {
-                SlicePlayerSheet(url: proxyURL, start: seg.startSeconds,
-                                 end: seg.trimToSeconds ?? seg.endSeconds, caption: seg.description)
+                let r = range(seg.id)
+                SlicePlayerSheet(url: proxyURL, start: r.start, end: r.end, caption: seg.description)
             }
         }
-    }
-
-    // MARK: top bar
-
-    private var topBar: some View {
-        HStack {
-            Button("Cancel") { router.back() }
-                .font(VeFont.sans(13, weight: .semibold))
-                .foregroundStyle(Color.veWarmGray)
-            Spacer()
-            VibeMeterPill(text: store?.vibeText ?? "")
-            Spacer()
-            Button("Done") { router.go(.export) }
-                .font(VeFont.sans(13, weight: .bold))
-                .foregroundStyle(Color.veTerracotta)
-        }
-        .padding(.horizontal, 22)
-        .padding(.top, 8)
-        .padding(.bottom, 6)
     }
 
     private var progressHeader: some View {
@@ -189,7 +224,7 @@ struct TriageView: View {
             store?.applyAISuggestions()
             Log.app("✨ Accepted all AI suggestions. \(store?.vibeText ?? "")")
             UINotificationFeedbackGenerator().notificationOccurred(.success)
-            router.go(.timeline)
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) { session.editorStage = .arrange }
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "wand.and.stars").font(.system(size: 13, weight: .bold))
@@ -227,7 +262,9 @@ struct TriageView: View {
                     TriageCardView(segment: seg,
                                    height: cardHeight,
                                    thumbnail: thumbs[seg.id],
-                                   isHook: store?.hookId == seg.id,
+                                   status: status(seg.id),
+                                   rangeStart: range(seg.id).start,
+                                   rangeEnd: range(seg.id).end,
                                    isFront: true,
                                    autoPlay: autoPlay,
                                    playerActive: playerActive,
@@ -355,7 +392,9 @@ struct TriageView: View {
             }
             .buttonStyle(.plain)
 
-            Button { router.go(.timeline) } label: {
+            Button {
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) { session.editorStage = .arrange }
+            } label: {
                 Text("Fine-tune →")
                     .font(VeFont.sans(13.5, weight: .bold)).foregroundStyle(Color.veCream)
                     .padding(.horizontal, 18).padding(.vertical, 11)
@@ -432,7 +471,7 @@ struct TriageView: View {
                     .font(VeFont.sans(11.5)).foregroundStyle(Color.veWarmGray)
             }
             Spacer(minLength: 0)
-            Button { store?.restore(seg.id) } label: {
+            Button { restoreToFront(seg.id) } label: {
                 Text("Restore")
                     .font(VeFont.sans(12.5, weight: .bold)).foregroundStyle(Color.veSage)
                     .padding(.horizontal, 13).padding(.vertical, 8)
@@ -520,13 +559,19 @@ private struct TriageCardView: View {
     let segment: Segment
     let height: CGFloat
     let thumbnail: UIImage?
-    let isHook: Bool
+    /// The clip's current standing in the live edit (hook / B-roll / cut / normal) — drives styling.
+    let status: ClipStatus
+    /// The clip's live in/out range (honoring trims), so the card plays the edited slice.
+    let rangeStart: Double
+    let rangeEnd: Double
     let isFront: Bool
     let autoPlay: Bool
     let playerActive: Bool
     let proxyURL: URL?
     let dragOffset: CGSize
     let onTapPreview: () -> Void
+
+    private var isHook: Bool { status == .hook }
 
     private var showsPlayer: Bool { isFront && autoPlay && proxyURL != nil }
     private var showsHints: Bool { isFront && dragOffset == .zero }
@@ -546,6 +591,23 @@ private struct TriageCardView: View {
     private var hintX: CGFloat { verdict.lean * 60 * hint * leanFactor }
     private var hintDegrees: Double { Double(verdict.lean) * 5 * Double(hint) * Double(leanFactor) }
 
+    // Status styling — hook outlined, B-roll tinted ochre, cut dimmed (applied on the body).
+    private var cardBackground: Color { status == .broll ? veBrollTone.opacity(0.10) : .white }
+    private var outlineColor: Color {
+        switch status {
+        case .hook:  return Color.veTerracotta
+        case .broll: return veBrollTone
+        default:     return .clear
+        }
+    }
+    private var outlineWidth: CGFloat {
+        switch status {
+        case .hook:  return 3
+        case .broll: return 2
+        default:     return 0
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             hero
@@ -556,8 +618,14 @@ private struct TriageCardView: View {
         // a neighbour. This is the fix for the deck-overlap regression.
         .frame(maxWidth: .infinity)
         .frame(height: height)
-        .background(Color.white)
+        .background(cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        // Status outline: hook → terracotta, B-roll → ochre, so the deck reads at a glance.
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(outlineColor, lineWidth: outlineWidth)
+        )
+        .opacity(status == .cut ? 0.62 : 1)
         .shadow(color: Color.veCharcoal.opacity(0.16), radius: 18, y: 14)
         .offset(x: dragOffset.width + hintX, y: dragOffset.height)
         .rotationEffect(.degrees(Double(dragOffset.width) * 0.04 + hintDegrees))
@@ -578,8 +646,8 @@ private struct TriageCardView: View {
         ZStack {
             if showsPlayer, let url = proxyURL {
                 LoopingPlayerView(url: url,
-                                  start: segment.startSeconds,
-                                  end: segment.trimToSeconds ?? segment.endSeconds,
+                                  start: rangeStart,
+                                  end: rangeEnd,
                                   isPlaying: playerActive)
             } else if let thumbnail {
                 Image(uiImage: thumbnail).resizable().scaledToFill()
@@ -654,10 +722,12 @@ private struct TriageCardView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 9) {
                 if isHook { tag("★ HOOK", fg: .white, bg: Color.veTerracotta) }
+                if status == .broll { tag("B-ROLL", fg: .white, bg: veBrollTone) }
+                if status == .cut { tag("CUT", fg: Color.veWarmGray, bg: Color.veSurface) }
                 SceneChip(text: segment.sceneType.label)
                 if segment.voiceoverCandidate { tag("VO", fg: Color.veTerracotta, bg: Color.veTerracotta.opacity(0.12)) }
                 Spacer()
-                Text("\(Int((( segment.trimToSeconds ?? segment.endSeconds) - segment.startSeconds).rounded()))s")
+                Text("\(Int((rangeEnd - rangeStart).rounded()))s")
                     .font(VeFont.sans(12.5, weight: .semibold)).foregroundStyle(Color.veWarmGray)
             }
             let why = verdict.reason(segment)

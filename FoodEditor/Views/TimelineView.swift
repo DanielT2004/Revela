@@ -26,8 +26,20 @@ struct TimelineView: View {
 
     // Reorder (driven by the grip handle)
     @State private var draggingId: UUID?
-    @State private var dragTranslation: CGFloat = 0
+    @State private var dragTranslation: CGFloat = 0    // dragRawTranslation + autoPanY (content-space delta)
     @State private var dropInsertion: Int?
+
+    // Drag-past-the-edge auto-scroll (mirrors PolishView's horizontal version). During a lift the native
+    // scroll is frozen and we scroll by a manual content offset (`dragScrollY`) — reliable, unlike
+    // programmatic scrollTo under scrollDisabled. On release we scrollTo so the dropped clip stays in view.
+    @State private var autoScroller = EdgeAutoScroller(axis: .vertical)
+    @State private var dragRawTranslation: CGFloat = 0  // finger movement in viewport space since lift
+    @State private var autoPanY: CGFloat = 0            // = dragScrollY; content-space delta from scroll
+    @State private var dragScrollY: CGFloat = 0         // manual scroll offset applied during the lift
+    @State private var viewportHeight: CGFloat = 0      // ScrollView viewport height
+    @State private var contentMinY: CGFloat = 0         // blockStack top in the fixed viewport space (resting)
+    @State private var contentMinYAtLift: CGFloat = 0
+    @State private var scrollProxy: ScrollViewProxy?
 
     // Trim (driven by the bottom handle)
     @State private var trimming: (id: UUID, base: Double)?
@@ -42,9 +54,19 @@ struct TimelineView: View {
     private let pps: CGFloat = 16
     private let gap: CGFloat = 10
 
+    /// Auto-scroll plumbing. The blocks are `.offset`-positioned in a fixed-height ZStack, so per-block
+    /// `scrollTo` anchors don't work (every block shares one layout slot). Instead an invisible ruler of
+    /// real-layout anchors gives `scrollTo` something to aim at; the live scroll offset is measured.
+    private let timelineSpace = "tlv"
+    private let anchorPitch: CGFloat = 8
+    private enum AnchorID: Hashable { case row(Int) }
+    private struct ScrollOffsetKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            header
             preview
             hookBar
             tabBar
@@ -170,21 +192,6 @@ struct TimelineView: View {
         Log.app("🎞️ Moved segment \(id) back to Main. \(store?.vibeText ?? "")")
     }
 
-    // MARK: - Header
-
-    private var header: some View {
-        HStack {
-            BackChevronButton { player.pause(); router.back() }
-            Spacer()
-            VibeMeterPill(text: store?.vibeText ?? "")
-            Spacer()
-            Color.clear.frame(width: 36, height: 36)
-        }
-        .padding(.horizontal, 22)
-        .padding(.top, 54)
-        .padding(.bottom, 10)
-    }
-
     // MARK: - Pinned live preview
 
     private var preview: some View {
@@ -276,15 +283,45 @@ struct TimelineView: View {
             if (store?.order.isEmpty ?? true) {
                 emptyState
             } else {
-                ScrollView {
-                    blockStack
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        ZStack(alignment: .top) {
+                            anchorRuler                    // first-class targets for the release scrollTo
+                            blockStack
+                        }
+                        .background(GeometryReader { g in
+                            Color.clear.preference(key: ScrollOffsetKey.self,
+                                                   value: g.frame(in: .named(timelineSpace)).minY)
+                        })
+                        .offset(y: -dragScrollY)           // manual auto-scroll while a clip is lifted
                         .padding(.horizontal, 22)
                         .padding(.top, 6)
                         .padding(.bottom, 24)
+                    }
+                    .scrollDisabled(draggingId != nil || trimming != nil)
+                    .coordinateSpace(name: timelineSpace)
+                    // Only track the resting offset (ignore the manual offset's own preference churn).
+                    .onPreferenceChange(ScrollOffsetKey.self) { y in if draggingId == nil { contentMinY = y } }
+                    .background(GeometryReader { g in
+                        Color.clear
+                            .onAppear { viewportHeight = g.size.height; scrollProxy = proxy }
+                            .onChange(of: g.size.height) { _, h in viewportHeight = h }
+                    })
                 }
-                .scrollDisabled(draggingId != nil || trimming != nil)
             }
         }
+    }
+
+    /// Invisible ruler of real-layout anchors (one every `anchorPitch` pts) that `scrollTo` can target.
+    private var anchorRuler: some View {
+        let n = max(2, Int((contentHeight / anchorPitch).rounded(.up)))
+        return VStack(spacing: 0) {
+            ForEach(Array(0..<n), id: \.self) { i in
+                Color.clear.frame(height: anchorPitch).id(AnchorID.row(i))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .top)
+        .allowsHitTesting(false)
     }
 
     private var emptyState: some View {
@@ -351,20 +388,11 @@ struct TimelineView: View {
     // MARK: - Bottom bar
 
     private var bottomBar: some View {
-        HStack(spacing: 10) {
-            Button { player.pause(); router.go(.polish) } label: {
-                Text("Polish")
-                    .font(VeFont.sans(15, weight: .bold)).foregroundStyle(Color.veCharcoal)
-                    .padding(.horizontal, 18).padding(.vertical, 16)
-                    .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(Color.veCharcoal.opacity(0.12), lineWidth: 1.5))
-            }
-            .buttonStyle(.plain)
-            PrimaryActionButton(title: "Export · \(Int((store?.totalDuration ?? 0).rounded()))s") {
-                player.pause()
-                router.go(.export)
-            }
+        // Forward CTA only — lateral moves use the shell's StageSwitcher, and Export lives in the shell
+        // header. (Matches the mockup's Arrange screen: a single "Continue to Polish".)
+        PrimaryActionButton(title: "Continue to Polish") {
+            player.pause()
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) { session.editorStage = .polish }
         }
         .padding(.horizontal, 22)
         .padding(.top, 10)
@@ -416,12 +444,10 @@ struct TimelineView: View {
         return arr
     }
 
-    /// Insertion index among the *other* blocks for the current finger position.
-    private func computeInsertion(_ translationY: CGFloat) -> Int {
-        guard let store, let dragId = draggingId,
-              let dragClip = store.order.first(where: { $0.id == dragId }) else { return 0 }
+    /// Insertion index among the *other* blocks for the dragged block's center in content space.
+    private func computeInsertion(draggedCenter center: CGFloat) -> Int {
+        guard let store, let dragId = draggingId else { return 0 }
         let staticTops = tops(store.order)
-        let center = (staticTops[dragId] ?? 0) + blockHeight(dragClip) / 2 + translationY
         var count = 0
         for clip in store.order where clip.id != dragId {
             let c = (staticTops[clip.id] ?? 0) + blockHeight(clip) / 2
@@ -436,33 +462,80 @@ struct TimelineView: View {
     /// a quick vertical drag is never captured here — it falls through to the ScrollView.
     private func reorderGesture(_ cid: UUID) -> some Gesture {
         LongPressGesture(minimumDuration: 0.28)
-            .sequenced(before: DragGesture(minimumDistance: 0))
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(timelineSpace)))
             .onChanged { value in
                 guard let store, case .second(true, let drag) = value else { return }
                 if draggingId != cid {
                     draggingId = cid
                     dropInsertion = store.order.firstIndex(where: { $0.id == cid })
-                    dragTranslation = 0
+                    dragRawTranslation = 0; autoPanY = 0; dragTranslation = 0; dragScrollY = 0
+                    contentMinYAtLift = contentMinY
                     UIImpactFeedbackGenerator(style: .rigid).impactOccurred()   // "lifted" cue
                 }
-                let t = drag?.translation.height ?? 0
-                dragTranslation = t
-                let ins = computeInsertion(t)
-                if ins != dropInsertion {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) { dropInsertion = ins }
-                }
+                dragRawTranslation = drag?.translation.height ?? 0
+                dragTranslation = dragRawTranslation + autoPanY
+                updateInsertion()
+                driveAutoScroll(fingerY: drag?.location.y ?? 0)
             }
             .onEnded { _ in
+                autoScroller.stop()
+                let pan = dragScrollY
                 guard let store, let did = draggingId, let ins = dropInsertion else {
-                    draggingId = nil; dropInsertion = nil; dragTranslation = 0; return
+                    draggingId = nil; dropInsertion = nil; dragTranslation = 0; autoPanY = 0; dragScrollY = 0; return
                 }
                 store.reorder(cid: did, to: ins)
                 Log.app("🎞️ Reorder clip → index \(ins). \(store.vibeText)")
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-                    draggingId = nil; dropInsertion = nil; dragTranslation = 0
+                // Removing the manual offset would snap the list back to the pre-auto-scroll spot, so if we
+                // auto-scrolled, hand the position to the real ScrollView: scroll the dropped clip into view.
+                if abs(pan) > 1 {
+                    let n = max(2, Int((contentHeight / anchorPitch).rounded(.up)))
+                    let idx = max(0, min(Int(((tops(store.order)[did] ?? 0) / anchorPitch).rounded()), n - 1))
+                    scrollProxy?.scrollTo(AnchorID.row(idx), anchor: .center)
                 }
+                draggingId = nil; dropInsertion = nil; dragTranslation = 0; autoPanY = 0; dragScrollY = 0
             }
+    }
+
+    /// Apply a measured content-scroll amount: refresh the dragged block's content-space delta and the
+    /// live drop index. Called from the scroll-offset preference as the timeline auto-scrolls.
+    private func applyAutoPan(_ pan: CGFloat) {
+        autoPanY = pan
+        dragTranslation = dragRawTranslation + autoPanY
+        updateInsertion()
+    }
+
+    /// While lifted and the finger is in the top/bottom edge band, scroll the timeline (via the manual
+    /// `dragScrollY` content offset) so the clip can be carried past the visible clips. Bounds keep it
+    /// from scrolling past either content end; the gate requires actually dragging toward that edge.
+    private func driveAutoScroll(fingerY: CGFloat) {
+        // dragScrollY range: how far the content can move up (toward the top) / down (toward the bottom)
+        // from the resting offset captured at lift, without exposing blank space past either end.
+        let minPan = contentMinYAtLift - 6                                          // top rest ≈ 6pt padding
+        let maxPan = contentMinYAtLift - (viewportHeight - contentHeight - 24)       // bottom (24pt padding)
+        let dy = dragRawTranslation
+        autoScroller.onTick = { delta in
+            guard maxPan > minPan else { return }
+            dragScrollY = max(minPan, min(dragScrollY + delta, maxPan))
+            applyAutoPan(dragScrollY)
+        }
+        autoScroller.update(location: fingerY, viewportLength: viewportHeight,
+                            canScrollStart: dragScrollY > minPan && dy < -8,
+                            canScrollEnd: dragScrollY < maxPan && dy > 8)
+    }
+
+    private func updateInsertion() {
+        let ins = computeInsertion(draggedCenter: currentDraggedCenter())
+        if ins != dropInsertion {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) { dropInsertion = ins }
+        }
+    }
+
+    /// The dragged block's center in content space (static slot + finger movement + auto-scroll).
+    private func currentDraggedCenter() -> CGFloat {
+        guard let store, let dragId = draggingId,
+              let dragClip = store.order.first(where: { $0.id == dragId }) else { return 0 }
+        return staticTop(dragId) + blockHeight(dragClip) / 2 + dragTranslation
     }
 
     /// Called continuously while the bottom handle is dragged (translation in points).

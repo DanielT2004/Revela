@@ -1,0 +1,207 @@
+import Foundation
+
+// ============================================================================
+// MARK: - EditBrief — the required per-video brief ("Anything special for this one?")
+// ============================================================================
+//
+// The creator fills this in before EVERY edit (gated between the picker and processing). It's
+// pre-filled from the active `StyleTemplate` so confirming the usual settings is one glance and the
+// creator only spends thought on what's special about THIS video. The answers become a prepended
+// prompt block (`BriefPromptBuilder.block`) sitting between the Style Block and the segmentation body.
+//
+// EVERY field here maps to a REAL lever the Gemini `editPlan` prompt actually returns and the assembler
+// actually executes — target length (recommended_duration), an ordered opener (final_edit_order head +
+// hook_score), a voiceover/b-roll lean (voiceover_candidate + broll_placements), keep-these-beats
+// (keep:true), and trim-the-slow-stuff (trim_to_seconds). Things the app CANNOT produce — music,
+// AI captions/text, "energy"/speed-ramps, CTA cards — are deliberately NOT here. Anything content-specific
+// goes in `note`; Gemini watches the footage, so it honors lines like "keep where I say the price".
+//
+// // TODO (future "read the video first"): a quick pre-analysis pass could populate real spoken moments
+// to tick, instead of the scene-type beats below. The struct is kept flat so that can slot in later.
+
+struct EditBrief: Equatable {
+    /// Which template this brief was pre-filled from (so the screen can detect a manual swap).
+    var sourceTemplateId: UUID?
+
+    var lengthSeconds: Int = 30          // → recommended_duration (slider 10…180)
+    var hookSequence: [HookShot] = []    // ordered openers → top of final_edit_order + hook_score
+    var brollLean: BrollLean = .balanced // → voiceover_candidate leaning + broll_placements coverage
+    var keepBeats: Set<KeepBeat> = []    // → keep:true + sensible placement
+    var trimSlowParts: Bool = true       // → trim_to_seconds on weak heads/tails + keep:false on filler
+    var note: String = ""                // free-text catch-all (content-specific asks, specific hook idea)
+
+    // MARK: length banding (mirrors the design's helper copy)
+
+    enum LengthBand { case punchy, standard, detailed, indepth }
+
+    var lengthBand: LengthBand {
+        switch lengthSeconds {
+        case ..<20:  return .punchy
+        case ...45:  return .standard
+        case ...90:  return .detailed
+        default:     return .indepth
+        }
+    }
+
+    var lengthBandLabel: String {
+        switch lengthBand {
+        case .punchy:   return "Punchy"
+        case .standard: return "Standard"
+        case .detailed: return "Detailed"
+        case .indepth:  return "In-depth"
+        }
+    }
+
+    var lengthBandMessage: String {
+        switch lengthBand {
+        case .punchy:   return "Quick and scroll-stopping — straight to the good stuff."
+        case .standard: return "Your usual rhythm — room to build to the payoff."
+        case .detailed: return "Slower and fuller — every beat gets its moment."
+        case .indepth:  return "A full walkthrough — recipe, story and all the detail."
+        }
+    }
+
+    /// Display value, e.g. "~30s" or "~1m 30s".
+    var lengthDisplay: String {
+        let s = lengthSeconds
+        if s < 60 { return "~\(s)s" }
+        let m = s / 60, r = s % 60
+        return r == 0 ? "~\(m)m" : "~\(m)m \(r)s"
+    }
+
+    // MARK: pre-fill
+
+    /// Build a brief seeded from the active template's learned profile, with sensible fallbacks when
+    /// there's no template. The video-specific fields (keep-beats, note) ALWAYS start empty so the
+    /// creator gives them fresh thought; the "usual settings" (length, opener, lean) are pre-filled.
+    static func prefilled(from template: StyleTemplate?) -> EditBrief {
+        var b = EditBrief()
+        b.sourceTemplateId = template?.id
+        guard let p = template?.profile else { return b }
+
+        let total = Int(p.pacing.totalLengthSeconds.rounded())
+        if total > 0 { b.lengthSeconds = min(180, max(10, total)) }
+
+        if let opener = HookShot(profileType: p.hook.type) { b.hookSequence = [opener] }
+        b.brollLean = BrollLean(voiceoverRatio: p.voiceover.voiceoverRatio)
+        return b
+    }
+}
+
+// ============================================================================
+// MARK: - Grounded choices (display label + prompt phrasing + scene-type mapping)
+// ============================================================================
+
+/// An opening shot type. Maps to the `editPlan` scene-type vocabulary so Gemini can find a real segment
+/// of this kind and boost its `hook_score`. Selected as an ORDERED list → back-to-back opener sequence.
+enum HookShot: String, CaseIterable, Equatable {
+    case foodCloseup, biteReaction, talking, plating, place
+
+    var label: String {
+        switch self {
+        case .foodCloseup:  return "Food close-up"
+        case .biteReaction: return "A bite / reaction"
+        case .talking:      return "Me talking"
+        case .plating:      return "Plating / the pour"
+        case .place:        return "The place"
+        }
+    }
+
+    /// The scene_type(s) this opener corresponds to (for the prompt).
+    var sceneType: String {
+        switch self {
+        case .foodCloseup:  return "food-closeup"
+        case .biteReaction: return "bite-reaction"
+        case .talking:      return "talking-head"
+        case .plating:      return "plating"
+        case .place:        return "ambiance/wide-shot"
+        }
+    }
+
+    /// Human phrasing for the brief prompt line.
+    var phrasing: String {
+        switch self {
+        case .foodCloseup:  return "a tight food close-up"
+        case .biteReaction: return "a bite or reaction"
+        case .talking:      return "you delivering a spoken hook or claim"
+        case .plating:      return "a plating or pour shot"
+        case .place:        return "an establishing shot of the place"
+        }
+    }
+
+    /// Map a learned profile hook type to an opener, or nil (let the AI pick).
+    init?(profileType: String) {
+        switch profileType {
+        case "food-closeup":                 self = .foodCloseup
+        case "bite-reaction":                self = .biteReaction
+        case "talking-head-claim", "pov":    self = .talking
+        case "plating", "action":            self = .plating
+        default:                             return nil
+        }
+    }
+}
+
+/// How much to replace the creator's face with food b-roll while their voice keeps playing. Steers
+/// `voiceover_candidate` leaning + the `broll_placements` coverage target.
+enum BrollLean: String, CaseIterable, Equatable {
+    case onCamera, balanced, brollHeavy
+
+    var label: String {
+        switch self {
+        case .onCamera:  return "Keep me on camera"
+        case .balanced:  return "Balanced"
+        case .brollHeavy:return "Lean on b-roll"
+        }
+    }
+
+    var phrasing: String {
+        switch self {
+        case .onCamera:
+            return "Keep the creator's face on camera. Mark voiceover_candidate true only where the strict rules truly require it, and keep broll_placements sparse."
+        case .balanced:
+            return "Balance face-on-camera with food b-roll using your normal judgement."
+        case .brollHeavy:
+            return "Wherever a talking segment qualifies under the strict voiceover rules, lean voiceover_candidate true and cover more of the talking with food b-roll."
+        }
+    }
+
+    /// Numeric coverage target handed to the coordinator's b-roll seeding cap. `nil` for balanced → fall
+    /// back to the template/profile default.
+    var coverageTarget: Double? {
+        switch self {
+        case .onCamera:  return 0.10
+        case .balanced:  return nil
+        case .brollHeavy:return 0.45
+        }
+    }
+
+    init(voiceoverRatio: Double) {
+        switch voiceoverRatio {
+        case ..<0.33: self = .onCamera
+        case 0.66...: self = .brollHeavy
+        default:      self = .balanced
+        }
+    }
+}
+
+/// A beat to guarantee survives the cut (`keep:true`). Grounded in scene types every food video tends to
+/// have — not arbitrary content topics.
+enum KeepBeat: String, CaseIterable, Equatable {
+    case biteReaction, finalDish, plating
+
+    var label: String {
+        switch self {
+        case .biteReaction: return "My bite reaction"
+        case .finalDish:    return "The final dish"
+        case .plating:      return "Plating / cooking"
+        }
+    }
+
+    var phrasing: String {
+        switch self {
+        case .biteReaction: return "the bite / reaction moment"
+        case .finalDish:    return "the final dish / beauty shot (place it near the end)"
+        case .plating:      return "a plating or cooking-action shot"
+        }
+    }
+}

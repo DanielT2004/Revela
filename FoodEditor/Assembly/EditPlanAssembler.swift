@@ -84,9 +84,21 @@ enum EditPlanAssembler {
         var cursor = CMTime.zero   // export timeline cursor (driven by the video track)
         var mixParams: [AVMutableAudioMixInputParameters] = []
 
+        // Cleaned-voice files (Voice Isolation) loaded + cached once. Mirrors `PolishComposition`.
+        var isoCache: [URL: (track: AVAssetTrack, duration: Double)] = [:]
+        func isolatedTrack(_ url: URL) async -> (track: AVAssetTrack, duration: Double)? {
+            if let c = isoCache[url] { return c }
+            let a = AVURLAsset(url: url)
+            guard let t = try? await a.loadTracks(withMediaType: .audio).first else { return nil }
+            let d = (try? await a.load(.duration).seconds) ?? .greatestFiniteMagnitude
+            let entry = (track: t, duration: d); isoCache[url] = entry; return entry
+        }
+
         /// Build one audio track (base or overlay) from clip pieces, with gaps + speed scaling, and
-        /// register its per-clip volume on the audio mix.
-        func buildAudioTrack(_ pieces: [AudioPiece]) async {
+        /// register its per-clip volume on the audio mix. When `isolated` is true (base track only), a
+        /// piece fully covered by a cleaned-voice span reads that file instead of the originals — same
+        /// coverage test as the preview, so what you hear is what you export.
+        func buildAudioTrack(_ pieces: [AudioPiece], isolated: Bool) async {
             guard !pieces.isEmpty,
                   let aTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
             else { return }
@@ -98,10 +110,30 @@ enum EditPlanAssembler {
                     aTrack.insertEmptyTimeRange(CMTimeRange(start: trackEnd, end: at))
                 }
                 var c = at
-                for piece in mapMergedRange(start: p.sourceStart, end: p.sourceStart + p.sourceDuration, sources: sources) {
-                    let info = await sourceInfo(piece.key)
-                    if let srcAudio = info.audio { try? aTrack.insertTimeRange(piece.range, of: srcAudio, at: c) }
-                    c = CMTimeAdd(c, piece.range.duration)
+                var insertedIsolated = false
+                if isolated,
+                   let span = store.isolatedSpan(forSourceStart: p.sourceStart, duration: p.sourceDuration),
+                   let iso = await isolatedTrack(span.url) {
+                    let localStart = max(0, p.sourceStart - span.startProxy)
+                    let localEnd = min(localStart + p.sourceDuration, iso.duration)
+                    if localEnd > localStart + 0.02 {
+                        let r = CMTimeRange(start: CMTime(seconds: localStart, preferredTimescale: 600),
+                                            end: CMTime(seconds: localEnd, preferredTimescale: 600))
+                        do {
+                            try aTrack.insertTimeRange(r, of: iso.track, at: at)
+                            c = CMTimeAdd(at, r.duration)
+                            insertedIsolated = true
+                        } catch {
+                            Log.audio("⚠️ export: cleaned insert failed @\(String(format: "%.1f", at.seconds))s (\(error.localizedDescription)) — using original.")
+                        }
+                    }
+                }
+                if !insertedIsolated {   // no span, load/range failure, or insert threw → original audio
+                    for piece in mapMergedRange(start: p.sourceStart, end: p.sourceStart + p.sourceDuration, sources: sources) {
+                        let info = await sourceInfo(piece.key)
+                        if let srcAudio = info.audio { try? aTrack.insertTimeRange(piece.range, of: srcAudio, at: c) }
+                        c = CMTimeAdd(c, piece.range.duration)
+                    }
                 }
                 if p.speed != 1 && CMTimeCompare(c, at) > 0 {
                     aTrack.scaleTimeRange(CMTimeRange(start: at, duration: CMTimeSubtract(c, at)),
@@ -174,8 +206,8 @@ enum EditPlanAssembler {
         guard cursor > .zero, !instructions.isEmpty else { throw AssemblyError.emptyComposition }
 
         // ---- AUDIO: base voice + un-muted overlay, mixed per-clip volume ----
-        await buildAudioTrack(store.baseAudioPieces())
-        await buildAudioTrack(store.overlayAudioPieces())
+        await buildAudioTrack(store.baseAudioPieces(), isolated: store.useIsolatedAudio)
+        await buildAudioTrack(store.overlayAudioPieces(), isolated: false)
 
         let videoComposition = AVMutableVideoComposition()
         videoComposition.renderSize = renderSize

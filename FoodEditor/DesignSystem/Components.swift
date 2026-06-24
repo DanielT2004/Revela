@@ -93,6 +93,24 @@ struct BackChevronButton: View {
     }
 }
 
+/// Round white "home" button from the Navigation Options mockup — exits the project back to the Kitchen.
+/// Reused by the post-analysis screen and the editor shell header so the affordance is identical everywhere.
+struct HomeButton: View {
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "house")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color.veNoteText)
+                .frame(width: 36, height: 36)
+                .background(Color.white, in: Circle())
+                .shadow(color: Color.veCharcoal.opacity(0.1), radius: 4, y: 1)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Home")
+    }
+}
+
 /// Brief charcoal toast pinned near the bottom (mirrors the mockup's toast).
 struct ToastView: View {
     let text: String

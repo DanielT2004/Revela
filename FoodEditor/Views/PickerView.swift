@@ -149,7 +149,7 @@ struct PickerView: View {
 
             PrimaryActionButton(title: "Edit this · \(session.count) clip\(session.count == 1 ? "" : "s")") {
                 Log.video("Editing \(session.count) clip(s), total \(session.totalDurationText).")
-                router.go(.processing)
+                router.go(.brief)
             }
         }
         .padding(.horizontal, 22)
@@ -168,31 +168,7 @@ struct PickerView: View {
 
     private func handlePicked(_ newClips: [PickedClip]) {
         showPicker = false
-        guard !newClips.isEmpty else { return }
-        Log.video("Adding \(newClips.count) clip(s) to the session…")
-        for picked in newClips {
-            let clip = SourceClip(url: picked.url, assetIdentifier: picked.assetIdentifier)
-            session.add(clip)
-            Task { await loadDetails(clipID: clip.id, url: picked.url) }
-        }
-    }
-
-    private func loadDetails(clipID: UUID, url: URL) async {
-        async let metaTask = VideoInspector.metadata(for: url)
-        async let thumbTask = ThumbnailService.thumbnail(for: url)
-        let meta = await metaTask
-        let thumb = await thumbTask
-        await MainActor.run {
-            session.updateDetails(id: clipID, metadata: meta, thumbnail: thumb)
-            if let meta, let idx = session.clips.firstIndex(where: { $0.id == clipID }) {
-                Log.video("""
-                Clip \(idx + 1) — \(url.lastPathComponent): \(meta.durationText) \
-                (\(String(format: "%.1f", meta.duration))s), \(meta.resolutionText) \
-                (\(meta.isPortrait ? "portrait" : "landscape")), \(meta.fileSizeText)
-                """)
-            }
-            Log.video("Session total: \(session.count) clip(s), \(session.totalDurationText), \(session.totalSizeText).")
-        }
+        session.ingest(newClips)   // shared with onboarding Connect (VideoSession.ingest)
     }
 }
 

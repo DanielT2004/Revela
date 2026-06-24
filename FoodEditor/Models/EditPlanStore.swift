@@ -30,6 +30,17 @@ struct AudioPiece: Equatable {
     let speed: Double            // 1 = normal
 }
 
+/// A cleaned-voice audio file (from ElevenLabs Voice Isolator) mapped to a **proxy-time** range. The
+/// editor addresses all base audio in proxy seconds (`AudioPiece.sourceStart`), so keying cleaned audio
+/// the same way means cuts/splits/reorders/trims re-slice it automatically — no drift. `url`'s local
+/// time 0 corresponds to `startProxy`. See `baseAudioPieces()` consumers in `PolishComposition` /
+/// `EditPlanAssembler`, which swap to this file wherever a span fully covers a piece.
+struct IsolatedAudioSpan: Equatable {
+    let startProxy: Double   // proxy seconds where this cleaned audio begins
+    let endProxy: Double     // proxy seconds where it ends
+    let url: URL             // cleaned MP3; local time 0 == startProxy
+}
+
 /// The single source of truth for an editing session. The analysis produces the immutable
 /// `EditPlan`; this store holds all *editable* state layered on top.
 ///
@@ -42,7 +53,14 @@ struct AudioPiece: Equatable {
 @Observable
 final class EditPlanStore {
     let plan: EditPlan
-    private let segmentsById: [Int: Segment]
+    /// Segment lookup. Seeded from the immutable plan; imported (post-analysis) clips register synthetic
+    /// segments here too, so every downstream lookup resolves them (`appendImportedSegments`).
+    private(set) var segmentsById: [Int: Segment]
+
+    /// Target fraction (0…1) of the final timeline to auto-cover with seeded B-roll — from the chosen
+    /// style template (default 25%). A safety cap on seeding; Gemini also gets this target via the style
+    /// block, so the prompt and the cap agree.
+    private let brollCoverageTarget: Double
 
     /// The **main spine** (Layer 1), in play order — each clip carries its own video + audio.
     /// (Seeded from `final_edit_order`, with food close-ups split off onto the B-roll layer.)
@@ -62,8 +80,17 @@ final class EditPlanStore {
     /// Layer "Text": burned-in captions over the assembled timeline (preview + export).
     var textOverlays: [TextOverlay] = []
 
-    init(plan: EditPlan) {
+    /// Voice Isolation (Polish page): cleaned-voice files keyed by proxy-time range. Empty until the
+    /// creator runs isolation. Session-only — the MP3s live in `temporaryDirectory` and are NOT
+    /// persisted to `EditState`, so a resumed project starts un-isolated.
+    var isolatedAudio: [IsolatedAudioSpan] = []
+    /// Master Original ↔ Cleaned toggle. When true, base pieces fully covered by an `isolatedAudio`
+    /// span read the cleaned file instead of the source; uncovered pieces still play the original.
+    var useIsolatedAudio: Bool = false
+
+    init(plan: EditPlan, brollCoverageTarget: Double = 0.25) {
         self.plan = plan
+        self.brollCoverageTarget = max(0, min(1, brollCoverageTarget))
         let byId: [Int: Segment] = Dictionary(plan.segments.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         self.segmentsById = byId
         func startOf(_ id: Int) -> Double { byId[id]?.startSeconds ?? 0 }
@@ -97,8 +124,8 @@ final class EditPlanStore {
         self.cutTray = plan.segments.filter { !$0.keep }.map(\.id)
         self.hookId = hook
         self.brollLane = []
-        // Auto-fill the overlay layer over the talking regions (needs the stored props above).
-        self.brollLane = seededLane()
+        // Auto-fill the overlay layer from Gemini's suggested placements (needs the stored props above).
+        self.brollLane = seededLane(fromPlacements: plan.brollPlacements)
     }
 
     // MARK: - Persistence (save / resume)
@@ -197,6 +224,67 @@ final class EditPlanStore {
         return t
     }
 
+    // MARK: - B-roll lane ripple (keep overlays anchored to the spine across edits)
+    //
+    // Overlays store an ABSOLUTE base-timeline second (`startOnBase`). When a spine edit moves/removes a
+    // clip, those positions go stale and overlays dangle past the new end. To make B-roll *follow the
+    // content*, we anchor each overlay to the spine clip it sits over (clip id + offset into that clip),
+    // run the edit, then re-derive `startOnBase` from the anchor clip's new position — dropping any overlay
+    // whose anchor clip was removed (ripple-delete). Wrap any spine mutation in `withRippledLane`.
+
+    private struct LaneAnchor { let clipId: UUID; let offset: Double }
+
+    /// Like `baseStart(of:)` but `nil` when the clip is no longer on the spine.
+    private func baseStartIfPresent(_ cid: UUID) -> Double? {
+        var t = 0.0
+        for c in order { if c.id == cid { return t }; t += c.timelineDuration }
+        return nil
+    }
+
+    /// Anchor every overlay to the spine clip it currently sits over (+ offset into that clip).
+    private func captureLaneAnchors() -> [UUID: LaneAnchor] {
+        var spans: [(id: UUID, start: Double, end: Double)] = []
+        var t = 0.0
+        for c in order { let d = c.timelineDuration; spans.append((c.id, t, t + d)); t += d }
+        var anchors: [UUID: LaneAnchor] = [:]
+        for o in brollLane {
+            if let s = spans.first(where: { o.startOnBase >= $0.start && o.startOnBase < $0.end }) {
+                anchors[o.id] = LaneAnchor(clipId: s.id, offset: o.startOnBase - s.start)
+            } else if let last = spans.last, o.startOnBase >= last.end {
+                anchors[o.id] = LaneAnchor(clipId: last.id, offset: last.end - last.start)   // sits at the end
+            }
+            // else: starts before the first clip (shouldn't happen) → leave unanchored; kept + clamped below.
+        }
+        return anchors
+    }
+
+    /// Re-derive overlay positions from their anchors after a spine edit, then clamp into
+    /// `[0, baseDuration]` (same bounds as `moveOverlay`/`trimOverlay`). Overlays whose anchor clip is
+    /// gone (the clip was cut or turned into B-roll) are NOT dropped — they keep their spot and just get
+    /// clamped in-bounds, so B-roll is never lost. (Only a fully empty spine clears the lane — overlays
+    /// have nothing to sit on.)
+    private func reapplyLaneAnchors(_ anchors: [UUID: LaneAnchor]) {
+        let total = baseDuration
+        guard total > 0 else { brollLane.removeAll(); return }
+        brollLane = brollLane.map { o in
+            var c = o
+            if let a = anchors[o.id], let newStart = baseStartIfPresent(a.clipId) {
+                c.startOnBase = newStart + a.offset                     // anchor clip survived → ripple with it
+            }
+            // else: anchor clip removed → keep the overlay where it is, clamped below (never dropped).
+            c.startOnBase = max(0, min(c.startOnBase, max(0, total - 0.3)))
+            c.duration = max(0.3, min(c.duration, total - c.startOnBase))
+            return c
+        }
+    }
+
+    /// Run a spine mutation while keeping the B-roll lane anchored to the content (ripple).
+    private func withRippledLane(_ mutate: () -> Void) {
+        let anchors = captureLaneAnchors()
+        mutate()
+        reapplyLaneAnchors(anchors)
+    }
+
     func isHook(_ id: Int) -> Bool { hookId == id }
     func isBroll(_ id: Int) -> Bool { brollClips.contains(id) }
     func isDismissed(_ id: Int) -> Bool { dismissed.contains(id) }
@@ -213,43 +301,73 @@ final class EditPlanStore {
         if !order.contains(where: { $0.sourceSegmentId == id }) { order.append(makeClip(id)) }
     }
 
+    // MARK: - Imported clips (post-analysis append, no Gemini)
+
+    /// Next free segment id — synthetic imported segments take ids above every existing one.
+    var nextSegmentId: Int { (segmentsById.keys.max() ?? -1) + 1 }
+
+    /// Every registered segment (plan + imported) — used by the UI to build thumbnails for all clips.
+    var allSegments: [Segment] { Array(segmentsById.values) }
+
+    /// Append imported clips to the END of the main spine, preserving all existing edits. Each synthetic
+    /// segment is registered for lookup, then a fresh spine clip is appended in pick order. Appending at
+    /// the end can't move existing overlays, so no ripple is needed. Caller pushes undo first.
+    func appendImportedSegments(_ segs: [Segment]) {
+        guard !segs.isEmpty else { return }
+        for s in segs { segmentsById[s.id] = s }       // register for makeClip / renderSlots / sourceLength
+        for s in segs { order.append(makeClip(s.id)) } // append to the spine in pick order
+    }
+
     /// Move a clip onto the B-roll layer (Layer 2). Its instance(s) leave the main spine.
     func markBroll(_ id: Int) {
-        cutTray.removeAll { $0 == id }
-        order.removeAll { $0.sourceSegmentId == id }
-        if !brollClips.contains(id) { brollClips.append(id) }
-        if hookId == id { hookId = order.first?.sourceSegmentId }
+        withRippledLane {
+            cutTray.removeAll { $0 == id }
+            order.removeAll { $0.sourceSegmentId == id }
+            if !brollClips.contains(id) { brollClips.append(id) }
+            if hookId == id { hookId = order.first?.sourceSegmentId }
+        }
     }
 
     /// Move a B-roll clip back onto the main spine, optionally at a specific index. Returns the new
     /// clip's id (for selection), or nil if it was already on the spine.
     @discardableResult
     func unmarkBroll(_ id: Int, at index: Int? = nil) -> UUID? {
-        brollClips.removeAll { $0 == id }
-        removeOverlays(of: id)
-        guard !order.contains(where: { $0.sourceSegmentId == id }) else { return nil }
-        let clip = makeClip(id)
-        if let index { order.insert(clip, at: max(0, min(index, order.count))) }
-        else { order.append(clip) }
-        return clip.id
+        var newId: UUID?
+        // Ripple: inserting onto the spine lengthens it, so keep the surviving overlays anchored to their
+        // content (the source's own overlays are removed here as it rejoins the spine).
+        withRippledLane {
+            brollClips.removeAll { $0 == id }
+            removeOverlays(of: id)
+            guard !order.contains(where: { $0.sourceSegmentId == id }) else { return }
+            let clip = makeClip(id)
+            if let index { order.insert(clip, at: max(0, min(index, order.count))) }
+            else { order.append(clip) }
+            newId = clip.id
+        }
+        return newId
     }
 
     func cut(_ id: Int) {
-        order.removeAll { $0.sourceSegmentId == id }
-        brollClips.removeAll { $0 == id }
-        removeOverlays(of: id)
-        if !cutTray.contains(id) { cutTray.append(id) }
-        if hookId == id { hookId = order.first?.sourceSegmentId }
+        withRippledLane {
+            order.removeAll { $0.sourceSegmentId == id }
+            brollClips.removeAll { $0 == id }
+            removeOverlays(of: id)
+            // Stack semantics: most-recently-cut clip sits on top of the Cut Tray.
+            if !cutTray.contains(id) { cutTray.insert(id, at: 0) }
+            if hookId == id { hookId = order.first?.sourceSegmentId }
+        }
     }
 
     func setHook(_ id: Int) {
         // The hook always opens the main spine.
-        cutTray.removeAll { $0 == id }
-        brollClips.removeAll { $0 == id }
-        removeOverlays(of: id)
-        order.removeAll { $0.sourceSegmentId == id }
-        order.insert(makeClip(id), at: 0)
-        hookId = id
+        withRippledLane {
+            cutTray.removeAll { $0 == id }
+            brollClips.removeAll { $0 == id }
+            removeOverlays(of: id)
+            order.removeAll { $0.sourceSegmentId == id }
+            order.insert(makeClip(id), at: 0)
+            hookId = id
+        }
     }
 
     func restore(_ id: Int) {
@@ -293,11 +411,14 @@ final class EditPlanStore {
 
     /// Remove a single clip instance from the spine (keeps the source available elsewhere).
     func deleteClip(_ cid: UUID) {
-        guard let i = clipIndex(cid) else { return }
-        let srcId = order[i].sourceSegmentId
-        order.remove(at: i)
-        if hookId == srcId && !order.contains(where: { $0.sourceSegmentId == srcId }) {
-            hookId = order.first?.sourceSegmentId
+        guard clipIndex(cid) != nil else { return }
+        withRippledLane {
+            guard let i = clipIndex(cid) else { return }
+            let srcId = order[i].sourceSegmentId
+            order.remove(at: i)
+            if hookId == srcId && !order.contains(where: { $0.sourceSegmentId == srcId }) {
+                hookId = order.first?.sourceSegmentId
+            }
         }
     }
 
@@ -445,25 +566,55 @@ final class EditPlanStore {
 
     func deleteTextOverlay(_ id: UUID) { textOverlays.removeAll { $0.id == id } }
 
-    /// Auto-fill: lay one (distinct) B-roll clip over each talking / voiceover region of the spine —
-    /// the "B-roll covers the talking" default, now visible and freely editable.
-    private func seededLane() -> [OverlayClip] {
-        let sources = brollClips.sorted { (segmentsById[$0]?.hookScore ?? 0) > (segmentsById[$1]?.hookScore ?? 0) }
-        guard !sources.isEmpty else { return [] }
+    /// Auto-fill the overlay lane from Gemini's `broll_placements` — each anchored to a spine segment +
+    /// offset (NOT timeline seconds; the spine doesn't exist until now). Sparse, contextual, varied: the
+    /// old cover-everything heuristic is gone. Entries are validated and clamped; if none map (or Gemini
+    /// suggested none), the lane stays empty and the creator places B-roll by hand on the Polish page.
+    ///
+    /// Why this is exact at seed time: every fresh spine clip has `speed == 1`, so a placement's
+    /// proxy-second offset equals a timeline-second offset → `startOnBase = baseStart(clip) + offset`.
+    /// Later spine edits keep these anchored via the ripple system, like any hand-placed overlay.
+    private func seededLane(fromPlacements placements: [BrollPlacement]) -> [OverlayClip] {
+        let total = baseDuration
+        guard total > 0, !placements.isEmpty else { return [] }
+
+        // The over-segment (the talking clip we cover) must be live on the spine. The B-roll source can be
+        // any kept, visual (non-talking-head) segment — the food-closeup pool, but also a plating/pour or
+        // other food shot Gemini judged the best match — as long as it isn't the over-segment itself.
+        var spineClipBySeg: [Int: Clip] = [:]
+        for c in order where spineClipBySeg[c.sourceSegmentId] == nil { spineClipBySeg[c.sourceSegmentId] = c }
+
+        let coverageCap = brollCoverageTarget * total
         var lane: [OverlayClip] = []
-        var t = 0.0
-        var si = 0
-        for c in order {
-            guard let s = segmentsById[c.sourceSegmentId] else { continue }
-            let d = c.sourceDuration
-            if s.voiceoverCandidate || s.sceneType == .talkingHead {
-                let srcId = sources[si % sources.count]; si += 1
-                lane.append(OverlayClip(sourceSegmentId: srcId, startOnBase: t,
-                                        duration: max(0.5, min(d, sourceLength(srcId)))))
+        var covered = 0.0
+
+        for p in placements {
+            guard let clip = spineClipBySeg[p.overSegmentId] else { continue }   // over-seg not on spine
+            guard let src = segmentsById[p.brollSegmentId], src.keep,            // source exists & is kept…
+                  p.brollSegmentId != p.overSegmentId,                          // …a different clip…
+                  src.sceneType != .talkingHead else { continue }               // …and a visual, not a face
+            let srcLen = sourceLength(p.brollSegmentId)
+            let segStart = baseStart(of: clip.id)
+            let segEnd = segStart + clip.timelineDuration
+
+            // Begin at the requested offset, clamped to sit inside the over-clip's window.
+            let offset = max(0, min(p.startOffsetSeconds, max(0, clip.timelineDuration - 0.3)))
+            var start = segStart + offset
+            var dur = min(p.durationSeconds, srcLen, segEnd - start, total - start)
+
+            // Never overlap an already-placed overlay: walk existing entries low→high and push past them.
+            for o in lane.sorted(by: { $0.startOnBase < $1.startOnBase })
+            where start < o.endOnBase && o.startOnBase < start + dur {
+                start = o.endOnBase
+                dur = min(p.durationSeconds, srcLen, segEnd - start, total - start)
             }
-            t += d
+
+            guard dur >= 0.3 else { continue }                                   // too short / pushed out
+            guard covered + dur <= coverageCap else { continue }                 // template coverage cap
+            lane.append(OverlayClip(sourceSegmentId: p.brollSegmentId, startOnBase: start, duration: dur))
+            covered += dur
         }
-        return lane
+        return lane.sorted { $0.startOnBase < $1.startOnBase }
     }
 
     // MARK: - Render slots (shared by preview + export)
@@ -547,6 +698,15 @@ final class EditPlanStore {
         }
     }
 
+    /// The cleaned-voice span (if any) that **fully covers** a base piece's source range — used by the
+    /// audio builders to swap in the isolated file. Returns `nil` when isolation is off or no span fully
+    /// covers `[sourceStart, sourceStart + duration]` (partial coverage falls back to the original).
+    func isolatedSpan(forSourceStart sourceStart: Double, duration: Double) -> IsolatedAudioSpan? {
+        guard useIsolatedAudio else { return nil }
+        let end = sourceStart + duration
+        return isolatedAudio.first { $0.startProxy <= sourceStart + 0.01 && $0.endProxy >= end - 0.01 }
+    }
+
     /// Reset the working edit to the AI's full recommendation — "Accept Vela's picks". Re-derives the
     /// spine, the B-roll layer, trims, and the auto-filled overlays. Everything stays reversible.
     func applyAISuggestions() {
@@ -570,7 +730,15 @@ final class EditPlanStore {
         order = ordered.filter { !brollLayer.contains($0) }.map(makeClip)
         brollClips = brollLayer.sorted { rawStart($0) < rawStart($1) }
         cutTray = plan.segments.filter { !$0.keep }.map(\.id)
-        brollLane = seededLane()
+        brollLane = seededLane(fromPlacements: plan.brollPlacements)
+
+        // Keep imported (post-analysis) clips: they aren't in `plan.segments`, so re-append them to the
+        // end of the spine rather than silently dropping them when resetting to the AI's picks.
+        let planIds = Set(plan.segments.map(\.id))
+        for id in segmentsById.keys.filter({ !planIds.contains($0) }).sorted()
+        where !order.contains(where: { $0.sourceSegmentId == id }) {
+            order.append(makeClip(id))
+        }
     }
 
     // MARK: - Derived display

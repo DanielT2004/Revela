@@ -90,7 +90,10 @@ struct SegmentListView: View {
 
     private var bottomBar: some View {
         VStack {
-            PrimaryActionButton(title: "Start editing") { router.go(.triage) }
+            PrimaryActionButton(title: "Start editing") {
+                session.editorStage = .sort           // enter the editor shell at the first stage
+                router.go(.editor)
+            }
         }
         .padding(.horizontal, 22)
         .padding(.top, 14)

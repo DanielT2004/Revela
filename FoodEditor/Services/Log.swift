@@ -15,6 +15,7 @@ enum Log {
         case poll     = "⏳ poll"
         case gemini   = "🤖 gemini"
         case assembly = "🎬 assembly"
+        case audio    = "🎙️ audio"
         case notif    = "🔔 notif"
     }
 
@@ -31,6 +32,7 @@ enum Log {
     static func poll(_ m: String)     { log(.poll, m) }
     static func gemini(_ m: String)   { log(.gemini, m) }
     static func assembly(_ m: String) { log(.assembly, m) }
+    static func audio(_ m: String)    { log(.audio, m) }
     static func notif(_ m: String)    { log(.notif, m) }
 
     /// Pretty-print a large blob (e.g. the raw Gemini response) with clear fences so it's easy

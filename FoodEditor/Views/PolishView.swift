@@ -12,9 +12,11 @@ import UIKit
 /// A clip at base time `t` sits at lane-x `laneW/2 - scrollX + t·pps`, so time 0 is under the centered
 /// playhead when `scrollX == 0`. MAIN + B-ROLL are functional; TEXT + AUDIO are rendered but empty.
 struct PolishView: View {
-    @Environment(AppRouter.self) private var router
     @Environment(VideoSession.self) private var session
+    @Environment(ClipImportCoordinator.self) private var clipImport
+    @Environment(VoiceIsolationCoordinator.self) private var voiceIso
 
+    @State private var showVideoPicker = false       // camera-roll picker for "Add videos"
     @State private var player = AVPlayer()
     @State private var previewPlaying = false
     @State private var fullscreen = false
@@ -27,13 +29,18 @@ struct PolishView: View {
     @State private var laneWidth: CGFloat = 320
     @State private var timeObserver: Any?
     @State private var rebuildTick = 0
+    @State private var voicePreview: PolishComposition.VoicePreview?   // handles for the in-place Original↔Cleaned swap
     @State private var sourcePicker: SourcePicker?
     @State private var trimming = false
     @State private var trimDrag: TrimDrag?
     @State private var lift: LiftDrag?
+    @State private var autoScroller = EdgeAutoScroller(axis: .horizontal)
+    @State private var autoPanX: CGFloat = 0          // px the timeline auto-scrolled during the current lift
     @State private var inspector: InspectorMode?
     @State private var splitFlash: SplitFlash?       // brief toast + scissor badge after a split
     @State private var splitFlashTask: Task<Void, Never>?
+    @State private var voiceToast: (text: String, ok: Bool)?   // brief banner when isolation finishes/fails
+    @State private var voiceToastTask: Task<Void, Never>?
 
     @State private var pps: CGFloat = 14             // points per second (pinch-zoomable)
     @State private var zoomBasePps: CGFloat = 14
@@ -65,7 +72,7 @@ struct PolishView: View {
                               var transientScale: Double = 1; var transientPanX: CGFloat = 0; var transientPanY: CGFloat = 0 }
     private let previewSpace = "preview"
     private let previewHeight: CGFloat = 264
-    private enum InspectorMode { case speed, volume }
+    private enum InspectorMode { case speed, volume, voice }
     private enum SourcePicker: Identifiable {
         case add, swap(UUID)
         var id: String { switch self { case .add: return "add"; case .swap(let u): return "swap-\(u)" } }
@@ -102,6 +109,12 @@ struct PolishView: View {
     private let mainH: CGFloat = 40
     private let brollH: CGFloat = 30
     private let audioH: CGFloat = 20
+    /// Downward drag (dy) past which a lifted Main clip becomes a B-roll drop instead of a reorder.
+    /// 30pt clears the Main lane (mainH/2 + trackGap) and enters the B-roll row.
+    private let brollDropThreshold: CGFloat = 30
+    /// Upward drag (dy) past which a lifted B-roll chip promotes onto the Main spine instead of moving.
+    /// 34pt ≈ brollH/2 + trackGap + mainH/2 — the gap from the B-roll row up into the Main row.
+    private let mainPromoteThreshold: CGFloat = 34
 
     private var total: Double { store?.baseDuration ?? 0 }
     private var playheadTime: Double { pps > 0 ? Double(scrollX) / Double(pps) : 0 }
@@ -109,7 +122,6 @@ struct PolishView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
             preview
             transportRow
             playbackRow
@@ -119,6 +131,15 @@ struct PolishView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.veCream.ignoresSafeArea())
+        .overlay { importProgressOverlay }
+        .overlay(alignment: .top) { voiceToastBanner }
+        .onChange(of: voiceIso.phase) { _, phase in
+            switch phase {
+            case .done:           showVoiceToast(text: "Clean voice ready", ok: true)
+            case .failed(let m):  showVoiceToast(text: m, ok: false)
+            default:              break
+            }
+        }
         .task { await loadThumbnails() }
         .task(id: previewSignature) { await rebuildPreview() }
         .onAppear(perform: addObserver)
@@ -128,6 +149,19 @@ struct PolishView: View {
         }
         .onDisappear(perform: teardown)
         .sheet(item: $sourcePicker) { picker in sourceSheet(picker) }
+        .sheet(isPresented: $showVideoPicker) {
+            VideoPicker(preselectedIdentifiers: session.selectedAssetIdentifiers) { picked in
+                showVideoPicker = false
+                guard !picked.isEmpty else { return }
+                store?.pushUndo()                                   // one undo step for the whole import
+                Task {
+                    await clipImport.importClips(picked, into: session)
+                    rebuildTick += 1                                // rebuild preview against the new proxy
+                    await loadThumbnails()                          // fill thumbnails for the new clips
+                }
+            }
+            .ignoresSafeArea()
+        }
         .sheet(isPresented: Binding(get: { editingText != nil }, set: { if !$0 { closeTextEditor() } })) {
             textEditorSheet
                 .presentationDetents([.height(308), .large])
@@ -137,53 +171,6 @@ struct PolishView: View {
         .fullScreenCover(isPresented: $fullscreen) {
             FullScreenPlayer(player: player) { fullscreen = false }
         }
-    }
-
-    // MARK: - Header
-
-    private var header: some View {
-        HStack(spacing: 12) {
-            Button { player.pause(); router.back() } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.veNoteText)
-                    .frame(width: 34, height: 34)
-                    .background(Color.white, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.veCharcoal.opacity(0.1), lineWidth: 1))
-                    .shadow(color: Color.veCharcoal.opacity(0.07), radius: 3, y: 1)
-            }
-            .buttonStyle(.plain)
-            Spacer()
-            VStack(spacing: 1) {
-                Text(projectTitle).font(VeFont.sans(14.5, weight: .bold)).foregroundStyle(Color.veCharcoal).lineLimit(1)
-                Text("POLISH").font(VeFont.mono(9, weight: .semibold)).tracking(1.2).foregroundStyle(Color.veTerracotta)
-            }
-            Spacer()
-            if editingText != nil {
-                Button { closeTextEditor() } label: {
-                    Text("Done")
-                        .font(VeFont.sans(12.5, weight: .bold)).foregroundStyle(Color.veOnTerracotta)
-                        .frame(height: 34).padding(.horizontal, 16)
-                        .background(Color.veSage, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            } else {
-                Button { player.pause(); router.go(.export) } label: {
-                    Text("Export")
-                        .font(VeFont.sans(12.5, weight: .bold)).foregroundStyle(Color.veOnTerracotta)
-                        .frame(height: 34).padding(.horizontal, 14)
-                        .background(Color.veTerracotta, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 16).padding(.top, 54).padding(.bottom, 4)
-    }
-
-    private var projectTitle: String {
-        let s = (store?.plan.videoSummary ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !s.isEmpty else { return "Your cut" }
-        let words = s.split(separator: " ").prefix(3).joined(separator: " ")
-        return words.prefix(1).uppercased() + words.dropFirst()
     }
 
     // MARK: - Preview
@@ -420,8 +407,10 @@ struct PolishView: View {
                     ruler(laneW)
                     laneRow(kind: .text, height: textH) { textLane(laneW) }
                     laneRow(kind: .main, height: mainH) { mainLane(laneW) }
+                        .background(mainPromoteHighlight)
                     laneRow(kind: .broll, height: brollH) { brollLane(laneW) }
-                    laneRow(kind: .audio, height: audioH) { Color.clear }    // AUDIO — empty // TODO: audio track
+                        .background(brollDropHighlight)
+                    laneRow(kind: .audio, height: audioH) { audioLaneContent(laneW) }   // AUDIO — cleaned-range bars
                         .opacity(dimTextAudio)
                 }
                 .padding(.top, 4)
@@ -453,7 +442,29 @@ struct PolishView: View {
         .frame(maxHeight: .infinity)
         .background(Color.veTrackLane)
         .overlay(alignment: .top) { Rectangle().fill(Color.veCharcoal.opacity(0.08)).frame(height: 1) }
-        .overlay(alignment: .topTrailing) { addBrollButton.padding(.trailing, 10).padding(.top, 8) }
+        .overlay(alignment: .topTrailing) {
+            HStack(spacing: 6) { addVideosButton; addBrollButton }
+                .padding(.trailing, 10).padding(.top, 8)
+        }
+    }
+
+    /// Pick more camera-roll clips and append them raw to the end of the spine (no re-analysis).
+    private var addVideosButton: some View {
+        Button {
+            previewPlaying = false; player.pause()
+            showVideoPicker = true
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "plus").font(.system(size: 10, weight: .bold))
+                Text("Videos").font(VeFont.sans(10, weight: .bold))
+            }
+            .foregroundStyle(Color.veCharcoal)
+            .padding(.horizontal, 9).padding(.vertical, 5)
+            .background(Color.veCream, in: Capsule())
+            .overlay(Capsule().stroke(Color.veCharcoal.opacity(0.14), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .disabled(clipImport.isBusy)
     }
 
     private var addBrollButton: some View {
@@ -468,6 +479,25 @@ struct PolishView: View {
             .shadow(color: Color.veTerracotta.opacity(0.3), radius: 5, y: 2)
         }
         .buttonStyle(.plain)
+    }
+
+    /// Dim + spinner while clips are being re-merged into the proxy (stays on the Polish page — never
+    /// routes to ProcessingView, which would re-run Gemini).
+    @ViewBuilder private var importProgressOverlay: some View {
+        if clipImport.isBusy {
+            ZStack {
+                Color.veCharcoal.opacity(0.35).ignoresSafeArea()
+                VStack(spacing: 12) {
+                    ProgressView(value: clipImport.progress)
+                        .progressViewStyle(.linear).frame(width: 180).tint(Color.veTerracotta)
+                    Text("Adding your clips…")
+                        .font(VeFont.sans(13, weight: .semibold)).foregroundStyle(Color.veCharcoal)
+                }
+                .padding(24)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .transition(.opacity)
+        }
     }
 
     /// One track row: a fixed 24pt gutter icon + a clipped lane the content scrolls within.
@@ -532,6 +562,38 @@ struct PolishView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Dashed terracotta wash behind the Main lane while a B-roll chip is dragged up onto it — the
+    /// "drop here to make a main clip" affordance (the mirror of `brollDropHighlight`).
+    @ViewBuilder private var mainPromoteHighlight: some View {
+        if draggingBrollToMain {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.veTerracotta.opacity(0.14))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(Color.veTerracotta.opacity(0.5),
+                                      style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                )
+                .padding(.leading, gutter)
+                .transition(.opacity)
+        }
+    }
+
+    /// Dashed terracotta wash behind the B-roll lane while a Main clip is dragged down onto it — the
+    /// "drop here to make B-roll" affordance. Padded past the 24pt gutter so it aligns under the lane.
+    @ViewBuilder private var brollDropHighlight: some View {
+        if draggingBaseToBroll {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.veTerracotta.opacity(0.14))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(Color.veTerracotta.opacity(0.5),
+                                      style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                )
+                .padding(.leading, gutter)
+                .transition(.opacity)
+        }
     }
 
     private func mainClipTile(_ clip: Clip) -> some View {
@@ -846,6 +908,10 @@ struct PolishView: View {
             toolbarItem(.speed, "Speed", active: inspector == .speed) { openInspector(.speed) }
             toolbarItem(.text, "Text", active: isTextSelected) { addText() }
             toolbarItem(.volume, "Volume", active: inspector == .volume) { openInspector(.volume) }
+            toolbarItem(.cleanVoice, "Clean", active: inspector == .voice) {
+                guard store != nil else { return }
+                inspector = (inspector == .voice) ? nil : .voice
+            }
             toolbarItem(.delete, "Delete", active: selection != nil) { deleteSelected() }
         }
         .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 28)
@@ -873,6 +939,32 @@ struct PolishView: View {
     private func xFor(_ t: Double, _ laneW: CGFloat) -> CGFloat { laneW / 2 - scrollX + CGFloat(t) * pps }
     private func baseStart(_ clip: Clip) -> Double { store?.baseStart(of: clip.id) ?? 0 }
     private func clampScroll(_ x: CGFloat) -> CGFloat { max(0, min(x, CGFloat(total) * pps)) }
+
+    /// Is this spine clip's source range fully covered by a cleaned-voice span? (Visual indicator only —
+    /// not gated on the toggle so the bars reflect what's been isolated.)
+    private func isClipCleaned(_ clip: Clip) -> Bool {
+        store?.isolatedAudio.contains { $0.startProxy <= clip.inPoint + 0.01 && $0.endProxy >= clip.outPoint - 0.01 } ?? false
+    }
+
+    /// The Audio track's body: a green bar under each spine clip whose voice has been cleaned, shown when
+    /// the Cleaned toggle is on. Empty otherwise. Positioned in timeline coords like the other lanes.
+    @ViewBuilder
+    private func audioLaneContent(_ laneW: CGFloat) -> some View {
+        if let store, store.useIsolatedAudio, !store.isolatedAudio.isEmpty {
+            ZStack(alignment: .topLeading) {
+                ForEach(store.order, id: \.id) { clip in
+                    if isClipCleaned(clip) {
+                        Capsule().fill(Color.veSage.opacity(0.55))
+                            .frame(width: max(2, CGFloat(clip.timelineDuration) * pps - 2), height: audioH - 8)
+                            .offset(x: xFor(store.baseStart(of: clip.id), laneW) + 1, y: 4)
+                    }
+                }
+            }
+            .frame(width: laneW, height: audioH, alignment: .topLeading)
+        } else {
+            Color.clear
+        }
+    }
 
     // MARK: - Scrub / transport actions
 
@@ -1009,18 +1101,60 @@ struct PolishView: View {
 
     private func isLifted(_ sel: Selection) -> Bool { lift?.sel == sel }
     private func isTrimming(_ sel: Selection) -> Bool { trimDrag?.sel == sel }
-    private func liftY(_ sel: Selection) -> CGFloat { lift?.sel == sel ? min(0, lift!.t.height) : 0 }
+    /// A Main clip lifted on the spine may move up (reorder hint) OR down (drop to B-roll); overlay/text
+    /// stay clamped to non-positive (up only).
+    private func liftY(_ sel: Selection) -> CGFloat {
+        guard lift?.sel == sel else { return 0 }
+        if case .base = sel { return lift!.t.height }
+        return min(0, lift!.t.height)
+    }
+
+    /// True while a Main clip is being dragged far enough DOWN to drop it onto the B-roll lane. Guarded
+    /// so the last remaining spine clip can't be pulled off (that would leave an empty timeline).
+    private var draggingBaseToBroll: Bool {
+        guard let l = lift, case .base = l.sel else { return false }
+        return l.t.height > brollDropThreshold && (store?.order.count ?? 0) > 1
+    }
+
+    /// True while a B-roll overlay chip is dragged far enough UP to drop it onto the Main spine (the
+    /// mirror of `draggingBaseToBroll`). On commit it's promoted to a real spine clip via `unmarkBroll`.
+    private var draggingBrollToMain: Bool {
+        guard let l = lift, case .overlay = l.sel else { return false }
+        return l.t.height < -mainPromoteThreshold
+    }
+
+    /// Spine index where a promoting B-roll chip will land — from the chip's center mapped to base time.
+    private func promoteInsertionIndex() -> Int? {
+        guard draggingBrollToMain, let l = lift, case .overlay(let oid) = l.sel,
+              let store, let o = store.brollLane.first(where: { $0.id == oid }) else { return nil }
+        let dropCenter = displayStart(forOverlay: o) + o.duration / 2
+        var idx = 0
+        for c in store.order where baseStart(c) + c.timelineDuration / 2 < dropCenter { idx += 1 }
+        return idx
+    }
+
+    /// The gap (insertion index + chip width in seconds) the Main lane opens up while promoting, so the
+    /// right-side clips slide right to make room. Reused by `displayStart(forBase:)` and the insertion bar.
+    private var mainPromoteGap: (index: Int, dur: Double)? {
+        guard let idx = promoteInsertionIndex(), let l = lift, case .overlay(let oid) = l.sel,
+              let o = store?.brollLane.first(where: { $0.id == oid }) else { return nil }
+        return (idx, o.duration)
+    }
 
     /// Display start (base time) for a Main clip — dragged clip follows the finger, others reflow.
     /// While the **left** handle is trimmed, the left edge follows the finger (right edge stays put); it
     /// settles back into the contiguous spine on release.
     private func displayStart(forBase clip: Clip) -> Double {
         if let l = lift, case .base(let did) = l.sel {
-            if clip.id == did { return baseStart(clip) + Double(l.t.width / pps) }
+            if clip.id == did { return baseStart(clip) + Double((l.t.width + autoPanX) / pps) }
             return previewBaseStart(clip)
         }
         if let d = trimDrag, d.sel == .base(clip.id), d.leftEdge {
             return baseStart(clip) + (trimDisplay(d).lo - clip.inPoint) / clip.clampedSpeed
+        }
+        // Promoting a B-roll chip onto the spine: clips at/after the insertion slide right to open a gap.
+        if let gap = mainPromoteGap, let idx = store?.order.firstIndex(where: { $0.id == clip.id }), idx >= gap.index {
+            return baseStart(clip) + gap.dur
         }
         return baseStart(clip)
     }
@@ -1031,7 +1165,7 @@ struct PolishView: View {
     private func displayStart(forOverlay o: OverlayClip) -> Double {
         if let d = trimDrag, d.sel == .overlay(o.id) { return trimDisplay(d).lo }
         if let l = lift, l.sel == .overlay(o.id) {
-            return max(0, min(o.startOnBase + Double(l.t.width / pps), max(0, total - o.duration)))
+            return max(0, min(o.startOnBase + Double((l.t.width + autoPanX) / pps), max(0, total - o.duration)))
         }
         return o.startOnBase
     }
@@ -1042,7 +1176,7 @@ struct PolishView: View {
     private func displayStart(forText o: TextOverlay) -> Double {
         if let d = trimDrag, d.sel == .text(o.id) { return trimDisplay(d).lo }
         if let l = lift, l.sel == .text(o.id) {
-            return max(0, min(o.startTime + Double(l.t.width / pps), max(0, total - o.duration)))
+            return max(0, min(o.startTime + Double((l.t.width + autoPanX) / pps), max(0, total - o.duration)))
         }
         return o.startTime
     }
@@ -1053,9 +1187,10 @@ struct PolishView: View {
 
     /// Main reorder: insertion index among the other clips for the dragged clip's current center.
     private func mainInsertionIndex() -> Int? {
+        if draggingBaseToBroll { return nil }   // dragging down to B-roll, not reordering the spine
         guard let l = lift, case .base(let cid) = l.sel, let store,
               let dc = store.order.first(where: { $0.id == cid }) else { return nil }
-        let center = baseStart(dc) + Double(l.t.width / pps) + dc.timelineDuration / 2
+        let center = baseStart(dc) + Double((l.t.width + autoPanX) / pps) + dc.timelineDuration / 2
         var idx = 0
         for c in store.order where c.id != cid {
             if baseStart(c) + c.timelineDuration / 2 < center { idx += 1 }
@@ -1080,8 +1215,32 @@ struct PolishView: View {
     }
     /// Base time for the reorder insertion bar, or nil when not reordering a Main clip.
     private var mainInsertionBarTime: Double? {
+        if let gap = mainPromoteGap, let store {       // promoting a B-roll chip onto the spine
+            return store.order.prefix(gap.index).reduce(0.0) { $0 + $1.timelineDuration }
+        }
         guard let l = lift, case .base(let cid) = l.sel, let idx = mainInsertionIndex(), let store else { return nil }
         return store.order.filter { $0.id != cid }.prefix(idx).reduce(0.0) { $0 + $1.timelineDuration }
+    }
+
+    /// While a clip is lifted and the finger is in the left/right edge band, auto-scroll the timeline so
+    /// the clip can be carried to the very front/end. We add the *applied* (clamped) scroll delta into
+    /// `autoPanX`; because `xFor` subtracts `scrollX`, adding `autoPanX/pps` to the clip's displayed time
+    /// (see the `displayStart` helpers) keeps it pinned under the finger while everything else scrolls.
+    private func driveAutoScroll(fingerX: CGFloat) {
+        // Only engage when the user is actually dragging the clip TOWARD that edge — otherwise grabbing a
+        // clip that happens to sit near an edge (or dragging it straight down to demote) would wrongly
+        // scroll the whole timeline back to the start.
+        let dx = lift?.t.width ?? 0
+        let movingLeft = dx < -8, movingRight = dx > 8
+        autoScroller.onTick = { delta in
+            let newX = clampScroll(scrollX + delta)
+            autoPanX += (newX - scrollX)
+            scrollX = newX
+            seekPlayerOnly(to: playheadTime)
+        }
+        autoScroller.update(location: fingerX, viewportLength: laneWidth,
+                            canScrollStart: scrollX > 0 && movingLeft,
+                            canScrollEnd: scrollX < CGFloat(total) * pps && movingRight)
     }
 
     /// Hold (~0.3s) to lift a clip, then drag to move a B-roll clip or reorder a Main clip.
@@ -1092,30 +1251,53 @@ struct PolishView: View {
                 guard case .second(true, let drag) = value else { return }
                 if lift == nil {
                     lift = LiftDrag(sel: sel, baseStart: baseStart)
+                    autoPanX = 0
                     selection = sel; inspector = nil
                     previewPlaying = false; player.pause()
                     UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
                 }
                 lift?.t = drag?.translation ?? .zero
+                driveAutoScroll(fingerX: (drag?.location.x ?? 0) - gutter)
             }
             .onEnded { _ in commitLift() }
     }
 
     private func commitLift() {
+        autoScroller.stop()
+        defer { autoPanX = 0 }
         guard let l = lift, let store else { lift = nil; return }
         // A lift with no real drag is just a selection — don't push a no-op onto the undo stack.
-        guard abs(l.t.width) > 2 || abs(l.t.height) > 2 else { lift = nil; return }
+        guard abs(l.t.width) > 2 || abs(l.t.height) > 2 || autoPanX != 0 else { lift = nil; return }
         store.pushUndo()
         defer { lift = nil; if case .text = l.sel {} else { rebuildTick += 1 } }   // text isn't in the render model
+        let dragX = Double((l.t.width + autoPanX) / pps)                            // includes any auto-scroll
         switch l.sel {
         case .overlay(let oid):
-            let dur = store.brollLane.first(where: { $0.id == oid })?.duration ?? 0
-            store.moveOverlay(oid, toStart: max(0, min(l.baseStart + Double(l.t.width / pps), max(0, total - dur))))
+            if draggingBrollToMain, let o = store.brollLane.first(where: { $0.id == oid }),
+               let idx = promoteInsertionIndex() {
+                // Promote the chip onto the Main spine at the drop slot (mirror of base→B-roll demote).
+                if let newId = store.unmarkBroll(o.sourceSegmentId, at: idx) { selection = .base(newId) }
+                inspector = nil
+            } else {
+                let dur = store.brollLane.first(where: { $0.id == oid })?.duration ?? 0
+                store.moveOverlay(oid, toStart: max(0, min(l.baseStart + dragX, max(0, total - dur))))
+            }
         case .base(let cid):
-            if let idx = mainInsertionIndex() { store.reorder(cid: cid, to: idx) }
+            if draggingBaseToBroll, let clip = store.order.first(where: { $0.id == cid }) {
+                // Dropped onto the B-roll lane → move the clip off the spine and place it there. Capture
+                // the drop position BEFORE markBroll shortens the spine (which shifts baseDuration).
+                let segId = clip.sourceSegmentId
+                let dropStart = max(0, displayStart(forBase: clip))   // left edge in base seconds at release
+                store.markBroll(segId)                                // pull off the spine (ripples the lane)
+                store.addOverlay(sourceId: segId, at: dropStart)      // re-clamps to the now-shorter timeline
+                if let newId = store.brollLane.last?.id { selection = .overlay(newId) }
+                inspector = nil
+            } else if let idx = mainInsertionIndex() {
+                store.reorder(cid: cid, to: idx)
+            }
         case .text(let tid):
             let dur = store.textOverlays.first(where: { $0.id == tid })?.duration ?? 0
-            store.moveTextOverlay(tid, toStart: max(0, min(l.baseStart + Double(l.t.width / pps), max(0, total - dur))))
+            store.moveTextOverlay(tid, toStart: max(0, min(l.baseStart + dragX, max(0, total - dur))))
         }
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
@@ -1397,7 +1579,14 @@ struct PolishView: View {
 
     @ViewBuilder
     private var inspectorPanel: some View {
-        if inspector != nil, let store, let sel = selection {
+        if inspector == .voice, let store {
+            voiceInspector(store)
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .shadow(color: Color.veCharcoal.opacity(0.08), radius: 10, y: 4)
+                .padding(.horizontal, 16).padding(.top, 8)
+        } else if inspector != nil, let store, let sel = selection {
             VStack(alignment: .leading, spacing: 12) {
                 switch sel {
                 case .base(let cid):
@@ -1488,6 +1677,122 @@ struct PolishView: View {
         }.buttonStyle(.plain)
     }
 
+    // MARK: - Voice Isolation inspector
+
+    /// The "Clean" inspector: kick off isolation (whole video / this clip), watch progress, and A/B the
+    /// Original ↔ Cleaned voice once a cleaned track exists. Cleaned audio sent to / from ElevenLabs.
+    @ViewBuilder
+    private func voiceInspector(_ store: EditPlanStore) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Clean voice").font(VeFont.sans(12, weight: .bold)).foregroundStyle(Color.veWarmGray)
+                Spacer()
+                if !store.isolatedAudio.isEmpty, !voiceIso.isRunning {
+                    originalCleanedToggle(store)
+                }
+            }
+
+            if voiceIso.isRunning {
+                HStack(spacing: 10) {
+                    ProgressView().scaleEffect(0.8).tint(Color.veTerracotta)
+                    Text(voiceIso.label).font(VeFont.sans(12)).foregroundStyle(Color.veCharcoal)
+                    Spacer()
+                    Text("\(Int(voiceIso.progress * 100))%").font(VeFont.sans(11, weight: .bold))
+                        .foregroundStyle(Color.veWarmGray)
+                }
+            } else {
+                HStack(spacing: 10) {
+                    inspectorButton(store.isolatedAudio.isEmpty ? "Isolate entire video" : "Re-isolate all",
+                                    "mic.fill", tint: Color.veTerracotta) {
+                        voiceIso.start(session: session, scope: .entire)
+                    }
+                    if case .base(let cid) = selection, let clip = store.order.first(where: { $0.id == cid }) {
+                        inspectorButton("This clip", "wand.and.stars", tint: Color.veSage) {
+                            voiceIso.start(session: session, scope: .clip(start: clip.inPoint, end: clip.outPoint))
+                        }
+                    }
+                }
+                if case .failed(let msg) = voiceIso.phase {
+                    Text(msg).font(VeFont.sans(10)).foregroundStyle(Color.veTerracotta).lineLimit(3)
+                } else {
+                    Text(voiceHint(store)).font(VeFont.sans(10)).foregroundStyle(Color.veNoteText)
+                }
+            }
+        }
+    }
+
+    private func voiceHint(_ store: EditPlanStore) -> String {
+        if store.isolatedAudio.isEmpty {
+            return "Strips background noise from your voice with ElevenLabs. Select a clip to clean just that one."
+        }
+        let cleaned = store.order.filter { isClipCleaned($0) }.count
+        return "\(cleaned) of \(store.order.count) clip(s) cleaned · toggle Original/Cleaned to compare. Edits stay aligned."
+    }
+
+    private func originalCleanedToggle(_ store: EditPlanStore) -> some View {
+        HStack(spacing: 0) {
+            ForEach([false, true], id: \.self) { cleaned in
+                let on = store.useIsolatedAudio == cleaned
+                Button {
+                    guard store.useIsolatedAudio != cleaned else { return }
+                    store.useIsolatedAudio = cleaned
+                    // Seamless A/B: swap the audioMix in place (no item reload). An audioMix change only
+                    // takes effect after a render boundary, so re-seek to the current time to apply it.
+                    if let d = voicePreview {
+                        let t = player.currentTime()
+                        player.currentItem?.audioMix = PolishComposition.voiceAudioMix(d, useIsolated: cleaned)
+                        player.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
+                    } else {
+                        rebuildTick += 1   // fallback if the preview descriptor isn't ready
+                    }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                } label: {
+                    Text(cleaned ? "Cleaned" : "Original")
+                        .font(VeFont.sans(11, weight: .bold))
+                        .foregroundStyle(on ? Color.veOnTerracotta : Color.veWarmGray)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(on ? Color.veTerracotta : Color.clear, in: Capsule())
+                }.buttonStyle(.plain)
+            }
+        }
+        .padding(2)
+        .background(Color.veSurface, in: Capsule())
+    }
+
+    /// Transient banner shown when isolation finishes / fails — visible even if the inspector is closed.
+    @ViewBuilder private var voiceToastBanner: some View {
+        if let t = voiceToast {
+            HStack(spacing: 8) {
+                Image(systemName: t.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .font(.system(size: 14, weight: .bold))
+                Text(t.text).font(VeFont.sans(13, weight: .semibold)).lineLimit(2)
+            }
+            .foregroundStyle(Color.veOnTerracotta)
+            .padding(.horizontal, 16).padding(.vertical, 11)
+            .background(t.ok ? Color.veSage : Color.veTerracotta, in: Capsule())
+            .shadow(color: Color.veCharcoal.opacity(0.2), radius: 10, y: 4)
+            .padding(.top, 10).padding(.horizontal, 20)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .onTapGesture { dismissVoiceToast() }
+        }
+    }
+
+    private func showVoiceToast(text: String, ok: Bool) {
+        voiceToastTask?.cancel()
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) { voiceToast = (text, ok) }
+        voiceToastTask = Task {
+            try? await Task.sleep(nanoseconds: 2_600_000_000)
+            if Task.isCancelled { return }
+            dismissVoiceToast()
+        }
+    }
+
+    private func dismissVoiceToast() {
+        voiceToastTask?.cancel()
+        withAnimation(.easeOut(duration: 0.25)) { voiceToast = nil }
+        voiceIso.acknowledge()
+    }
+
     private func seekPlayerOnly(to t: Double) {
         player.seek(to: CMTime(seconds: max(0, min(t, total)), preferredTimescale: 600),
                     toleranceBefore: .zero, toleranceAfter: .zero)
@@ -1574,7 +1879,10 @@ struct PolishView: View {
         let lane = store.brollLane.map {
             "\($0.sourceSegmentId):\(Int($0.startOnBase * 100))+\(Int($0.duration * 100))v\(Int($0.volume * 100))"
         }.joined(separator: ",")
-        return base + "|" + lane + "|t\(rebuildTick)"
+        // NOTE: `useIsolatedAudio` is intentionally NOT here — toggling Original↔Cleaned swaps the
+        // audioMix in place (no rebuild). Only the SET of cleaned files (filenames) rebuilds the preview.
+        let iso = store.isolatedAudio.map { $0.url.lastPathComponent }.joined(separator: ",")
+        return base + "|" + lane + "|iso\(iso)|t\(rebuildTick)"
     }
 
     private func rebuildPreview() async {
@@ -1582,11 +1890,15 @@ struct PolishView: View {
         let slots = store.renderSlots()
         let baseAudio = store.baseAudioPieces()
         let overlayAudio = store.overlayAudioPieces()
-        guard let item = await PolishComposition.makeItem(proxyURL: proxyURL, slots: slots,
-                                                          baseAudio: baseAudio, overlayAudio: overlayAudio) else { return }
+        // Build BOTH base tracks whenever cleaned files exist; the toggle selects which is audible.
+        guard let preview = await PolishComposition.makeItem(proxyURL: proxyURL, slots: slots,
+                                                             baseAudio: baseAudio, overlayAudio: overlayAudio,
+                                                             isolated: store.isolatedAudio,
+                                                             useIsolated: store.useIsolatedAudio) else { return }
         await MainActor.run {
             AudioSession.configureForPlayback()
-            player.replaceCurrentItem(with: item)
+            voicePreview = preview
+            player.replaceCurrentItem(with: preview.item)
             seekPlayerOnly(to: playheadTime)
             if previewPlaying && !fullscreen { player.play() }
         }
@@ -1606,9 +1918,12 @@ struct PolishView: View {
         player.pause()
     }
 
+    /// Generate a poster frame per segment from the proxy. Re-runnable: skips ids already loaded, so it
+    /// fills in only newly-imported clips after an "Add videos" re-merge. Reads `store.allSegments`
+    /// (plan + imported), not the immutable `plan.segments`.
     private func loadThumbnails() async {
-        guard let proxyURL, thumbs.isEmpty else { return }
-        for seg in store?.plan.segments ?? [] {
+        guard let proxyURL, let store else { return }
+        for seg in store.allSegments where thumbs[seg.id] == nil {
             let t = seg.startSeconds + min(0.4, max(0, (seg.endSeconds - seg.startSeconds) / 2))
             if let img = await ThumbnailService.thumbnail(for: proxyURL, at: t) {
                 await MainActor.run { thumbs[seg.id] = img }

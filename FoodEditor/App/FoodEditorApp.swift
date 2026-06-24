@@ -6,6 +6,11 @@ struct FoodEditorApp: App {
         Log.app("FoodEditor (Vela) launched — MVP build. Verbose logging is ON.")
         NotificationService.shared.configure()
         AudioSession.configureForPlayback()
+        #if DEBUG
+        AuthStore.runSelfTest()
+        StyleTemplate.runSelfTest()
+        FileTemplateStore.runSelfTest()
+        #endif
     }
 
     var body: some Scene {

@@ -53,7 +53,7 @@ struct TrackIcon: View {
 
 /// The Polish bottom-toolbar icons (Split / Trim / Speed / Volume / Delete).
 struct ToolIcon: View {
-    enum Kind { case split, trim, speed, text, volume, delete }
+    enum Kind { case split, trim, speed, text, volume, delete, cleanVoice }
     let kind: Kind
     var color: Color
     var side: CGFloat = 22
@@ -88,6 +88,15 @@ struct ToolIcon: View {
                 strokeSeg(ctx, [(5, 7), (19, 7)], 1.7, k: k, color: color)
                 strokeSeg(ctx, [(10, 7), (10, 5), (14, 5), (14, 7)], 1.7, k: k, color: color)
                 strokeSeg(ctx, [(6, 7), (7, 20), (17, 20), (18, 7)], 1.7, k: k, color: color)
+            case .cleanVoice:                             // microphone + a sparkle (voice isolation)
+                ctx.stroke(Path(roundedRect: CGRect(x: 9 * k, y: 2.5 * k, width: 6 * k, height: 10 * k), cornerRadius: 3 * k),
+                           with: .color(color), style: StrokeStyle(lineWidth: 1.7 * k))
+                var cradle = Path(); cradle.move(to: p(6.5, 11)); cradle.addQuadCurve(to: p(17.5, 11), control: p(12, 17))
+                ctx.stroke(cradle, with: .color(color), style: StrokeStyle(lineWidth: 1.7 * k, lineCap: .round))
+                strokeSeg(ctx, [(12, 14.5), (12, 18.5)], 1.7, k: k, color: color)
+                strokeSeg(ctx, [(9, 18.5), (15, 18.5)], 1.7, k: k, color: color)
+                strokeSeg(ctx, [(19, 3), (19, 6)], 1.3, k: k, color: color)      // sparkle
+                strokeSeg(ctx, [(17.5, 4.5), (20.5, 4.5)], 1.3, k: k, color: color)
             }
         }
         .frame(width: side, height: side)
