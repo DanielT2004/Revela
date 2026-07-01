@@ -19,8 +19,10 @@ enum BriefPromptBuilder {
         // 1 — target length → recommended_duration
         lines.append("- Target final length: ~\(b.lengthSeconds)s. → Set recommended_duration near this and bias which segments you keep/drop and where you trim dead air to land close to it, but never shorten a segment mid-thought to hit the number.")
 
-        // 2 — ordered opener → top of final_edit_order + hook_score
-        if !b.hookSequence.isEmpty {
+        // 2 — opener: MAX SCROLL-STOP (let the AI pick the punchiest moment) OR a fixed ordered sequence
+        if b.maxScrollStopHook {
+            lines.append("- Cold open — MAX SCROLL-STOP (no fixed shot sequence): open on the SINGLE most arresting moment in the footage — the punchiest claim, the biggest first-taste/peak reaction, or the most striking food shot with a strong line over it — whatever stops the scroll in the first ~1.5s. Do NOT force a fixed opener order; pick the best opener the footage offers, put it at the very top of final_edit_order and boost its hook_score, follow it with a one-line stakes/verdict TEASE, then continue with the intro and the rest in intro → middle → end order. Keep it coherent — the opener + tease must still lead sensibly into the video.")
+        } else if !b.hookSequence.isEmpty {
             let ordered = b.hookSequence.enumerated()
                 .map { "\($0.offset + 1)) \($0.element.phrasing) [\($0.element.sceneType)]" }
                 .joined(separator: ", ")

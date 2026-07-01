@@ -122,13 +122,18 @@ final class AnalysisCoordinator {
             // Phase 1 — PREPPING: merge + compress (0 → 30%). This is an on-device AVFoundation export
             // that iOS kills if backgrounded, so the UI tells the creator to keep the app open; the
             // assertion only buys a brief grace window for an accidental tap-away. Reuse a prior merge.
+            // Compress the proxy AND transcribe the audio CONCURRENTLY — the compressor builds the video
+            // while on-device Speech reads the source clips' audio; they don't depend on each other, so
+            // running them together hides the transcription time behind the (longer) compression.
             let processed: ProcessedVideo
+            let words: [TranscriptionService.Word]
             if let existing = session.merged {
                 processed = existing
+                words = await TranscriptionService.transcribe(url: existing.url)   // proxy already merged
             } else {
                 stage = .preparing; progress = 0; label = "Prepping your footage"
                 prepStartedAt = Date(); smoothedEta = nil
-                processed = try await BackgroundActivity.run("vela-prep") {
+                async let compressed: ProcessedVideo = BackgroundActivity.run("vela-prep") {
                     try await VideoPreprocessor.mergeAndCompress(clips: session.clips) { [weak self] p in
                         Task { @MainActor in
                             self?.progress = p * 0.30
@@ -136,6 +141,9 @@ final class AnalysisCoordinator {
                         }
                     }
                 }
+                async let transcript: [TranscriptionService.Word] = TranscriptionService.transcribeClips(session.clips)
+                processed = try await compressed
+                words = await transcript
                 session.merged = processed
             }
 
@@ -149,29 +157,44 @@ final class AnalysisCoordinator {
             if Task.isCancelled { return }
             progress = 0.55
 
-            // Phase 3 — hand the analysis off to the server (55 → 60%).
-            label = "Analyzing your footage"; progress = 0.58
-            let prompt = styleBlock + briefBlock + GeminiPrompt.editPlan
-            let jobId = try await GeminiService.shared.startAnalysisJob(
-                fileURI: uploaded.fileURI, fileName: uploaded.fileName, mimeType: uploaded.mimeType, prompt: prompt)
+            // Phase 3 — hand off to the server. Two paths (FeatureFlags.twoCallPipeline):
+            //  • TWO-CALL (new): PERCEIVE (video → content index) → DECIDE (text-only → decisions) → ADAPT.
+            //  • MONOLITH (instant revert): the single edit-plan call.
+            // Both prepend the transcript block so the model anchors timing to real word times + exact length.
+            let transcriptBlock = TranscriptPromptBuilder.block(words: words, duration: processed.metadata.duration,
+                                                                clipStarts: processed.sourceSpans.map(\.startInMerged))
 
-            // Persist the job so it survives a full app KILL (not just backgrounding): copy the proxy to a
-            // durable spot + record the jobId. `resumeIfPending` re-attaches on relaunch.
-            AnalysisJobStore.save(jobId: jobId, clipSignature: signature ?? "",
-                                  proxyURL: processed.url, brollCoverageTarget: brollCoverageTarget)
-
-            // From here the work runs on Supabase (poll + generate) — the creator can now CLOSE THE APP.
-            stage = .analyzing
-
-            // Phase 4 — poll the job until done/failed (60 → 95%). The SERVER does the work; if the app
-            // is backgrounded here, nothing is lost — the poll just resumes when we're foreground again.
-            let raw = try await pollUntilFinished(jobId: jobId)
-
-            // A newer launch (Retry) may have superseded us — don't clobber its result.
-            if Task.isCancelled { return }
-
-            // Phase 5 — parse + finalize (95 → 100%).
-            try await finalize(raw: raw, processed: processed, session: session, projects: projects)
+            if FeatureFlags.twoCallPipeline {
+                // PERCEIVE — describe the footage (Flash, content-index schema). Async job → survives backgrounding.
+                label = "Watching your footage"; progress = 0.58
+                let perceivePrompt = transcriptBlock + "\n\n" + PerceivePrompt.body
+                let perceiveJob = try await GeminiService.shared.startAnalysisJob(
+                    fileURI: uploaded.fileURI, fileName: uploaded.fileName, mimeType: uploaded.mimeType,
+                    prompt: perceivePrompt, schema: PerceivePrompt.schema)
+                AnalysisJobStore.save(jobId: perceiveJob, clipSignature: signature ?? "",
+                                      proxyURL: processed.url, brollCoverageTarget: brollCoverageTarget)
+                stage = .analyzing
+                let indexRaw = try await pollUntilFinished(jobId: perceiveJob)
+                if Task.isCancelled { return }
+                // DECIDE (text-only, Pro) → ADAPT → ship.
+                try await decideAndShip(indexRaw: indexRaw, styleBriefBlock: styleBlock + briefBlock,
+                                        processed: processed, session: session, projects: projects,
+                                        words: words, perceiveJobId: perceiveJob)
+            } else {
+                // MONOLITH — the single edit-plan call.
+                label = "Analyzing your footage"; progress = 0.58
+                let prompt = styleBlock + briefBlock + transcriptBlock + GeminiPrompt.editPlan
+                let jobId = try await GeminiService.shared.startAnalysisJob(
+                    fileURI: uploaded.fileURI, fileName: uploaded.fileName, mimeType: uploaded.mimeType, prompt: prompt)
+                AnalysisJobStore.save(jobId: jobId, clipSignature: signature ?? "",
+                                      proxyURL: processed.url, brollCoverageTarget: brollCoverageTarget)
+                stage = .analyzing
+                let raw = try await pollUntilFinished(jobId: jobId)
+                if Task.isCancelled { return }
+                let parsed = try EditPlan.parse(fromRawModelText: raw)
+                try await ship(parsed: parsed, processed: processed, session: session, projects: projects,
+                               prompt: prompt, rawForCapture: raw, jobId: jobId, words: words)
+            }
         } catch is CancellationError {
             return                                                  // superseded — leave newer state intact
         } catch {
@@ -202,48 +225,87 @@ final class AnalysisCoordinator {
 
     /// Polls the server job until it finishes, nudging the progress arc on each active tick. The poll /
     /// transient-swallow / cancellation / timeout logic lives in the shared `GeminiService.awaitJobResult`.
-    private func pollUntilFinished(jobId: String) async throws -> String {
+    private func pollUntilFinished(jobId: String, editing: Bool = false) async throws -> String {
         try await GeminiService.shared.awaitJobResult(jobId: jobId) { [weak self] stage in
             Task { @MainActor in
-                self?.label = stage
-                self?.progress = min(0.95, max(self?.progress ?? 0, 0.6) + 0.015)   // gentle creep
+                self?.label = editing ? "Editing your video" : stage   // DECIDE poll keeps the editing label
+                self?.progress = min(0.97, max(self?.progress ?? 0, editing ? 0.92 : 0.6) + (editing ? 0.008 : 0.015))
             }
         }
     }
 
-    /// The tail of the pipeline: parse the model JSON into an Edit Plan, install it as the session's
-    /// store, mark done, register + save the project, notify, and capture a Home-tile poster. Behaviour
-    /// is unchanged from the old on-device flow — only how we *got* `raw` changed (a server job).
-    private func finalize(raw: String, processed: ProcessedVideo,
-                          session: VideoSession, projects: ProjectService, resumed: Bool = false) async throws {
+    /// The shared SHIPPING TAIL for BOTH the monolith and the two-call pipeline: validate → word-snap →
+    /// b-roll repair → install the store → save / notify / poster. `parsed` is the assembled `EditPlan`
+    /// (the monolith parses `raw`; the two-call path ADAPTs the decisions into one). `rawForCapture` is
+    /// whatever raw model text to save for inspection (the monolith JSON, or the DECIDE decisions JSON).
+    private func ship(parsed: EditPlan, processed: ProcessedVideo,
+                      session: VideoSession, projects: ProjectService, resumed: Bool = false,
+                      prompt: String? = nil, rawForCapture: String, jobId: String? = nil,
+                      words: [TranscriptionService.Word] = [], adaptWarnings: [String] = [],
+                      spineIsVerbatim: Bool = false,
+                      serverNotifies: Bool = true) async throws {
         stage = .finishing; etaSeconds = nil
         label = "Putting it together"; progress = 0.97
-        let parsed = try EditPlan.parse(fromRawModelText: raw)
+        if !adaptWarnings.isEmpty { Log.gemini("ADAPT warnings (\(adaptWarnings.count)) — " + adaptWarnings.joined(separator: " · ")) }
+
+        // Capture the run's INPUTS for inspection. Best-effort, gated, DEBUG-default.
+        let bundle = EvalArtifactStore.captureInputs(
+            proxyURL: processed.url, prompt: prompt, raw: rawForCapture,
+            clipSignature: signature ?? "", proxyDuration: processed.metadata.duration,
+            styleBlockChars: styleBlock.count, briefBlockChars: briefBlock.count,
+            jobId: jobId, resumed: resumed)
+
         Log.blob(.gemini, "DECODED EDIT PLAN", parsed.debugSummary)
         Log.gemini(parsed.sectionAuditLine)   // invariant audit — flags a dropped intro / untagged segments
 
-        session.store = EditPlanStore(plan: parsed, brollCoverageTarget: brollCoverageTarget,
-                                      openerCount: session.brief?.hookSequence.count ?? 0)
-        rawResponse = raw
+        // Measure the AI's RAW plan first (so we keep seeing how often it breaks its own rules)…
+        let aiValidation = EditPlanValidator.validate(parsed, proxyDuration: processed.metadata.duration)
+        Log.gemini("Plan validation (AI) — \(aiValidation.summary)")
+
+        // …word-snap the OUT points to the transcript so a cut never lands mid-word (deterministic safety
+        // net; the one place code TRANSFORMS the plan). No transcript → exact no-op. Then deterministically
+        // repair the b-roll source-not-kept failure and re-validate what we SHIP. The model is
+        // non-deterministic run-to-run, so these code passes guarantee a clean plan every time.
+        let (snappedPlan, snapActions) = WordSnapper.snap(parsed, words: words)
+        if !snapActions.isEmpty {
+            Log.gemini("Word-snap (\(snapActions.count)) — " + snapActions.joined(separator: " · "))
+        }
+        let (plan, repairActions) = EditPlanRepair.repairBroll(snappedPlan)
+        let validation = EditPlanValidator.validate(plan, proxyDuration: processed.metadata.duration)
+        if !repairActions.isEmpty {
+            Log.gemini("B-roll repair (\(repairActions.count)) — " + repairActions.joined(separator: " · "))
+            Log.gemini("Plan validation (shipped, after repair) — \(validation.summary)")
+        }
+        if let bundle {
+            EvalArtifactStore.attachPlan(bundle: bundle, plan: plan, validation: validation,
+                                         aiValidation: aiValidation, repairActions: repairActions)
+        }
+
+        session.store = EditPlanStore(plan: plan, brollCoverageTarget: brollCoverageTarget, spineIsVerbatim: spineIsVerbatim)
+        rawResponse = rawForCapture
         progress = 1.0
         phase = .done
-        // CP1.2 — register this analyzed session as a saved project.
-        projects.startNew(from: parsed)
+        // CP1.2 — register this analyzed session as a saved project (the repaired plan, so resume keeps the fix).
+        projects.startNew(from: plan)
         projects.save(session: session, reaching: .triage)
 
-        // De-dupe with the server's APNs push: only ping locally when the app is FOREGROUND and this
-        // wasn't a reopen-resume. A killed/backgrounded finish is covered by the server push (the one
-        // thing a local notification can't deliver). `screen` lets a tap route to the reveal.
-        if !resumed, UIApplication.shared.applicationState == .active {
+        // Notify "cut is ready" — exactly once, only for the completions the SERVER can't announce.
+        // `serverNotifies` is true when a server job's success push covers this finish (the monolith
+        // `analyze` job); in that case the client stays silent to avoid a double when the user reopens after
+        // backgrounding. It's false when DECIDE ran ON-DEVICE (the two-call Gemini path) — no server job, so
+        // the client posts the only ping. Fires in background too (the on-device DECIDE runs under a
+        // background assertion), just not on a reopen-resume (the user is already back in the app;
+        // `phase == .done` routes them to the reveal).
+        if !serverNotifies, !resumed {
             NotificationService.shared.notify(
                 title: "Your cut is ready 🍴",
-                body: "\(parsed.segments.count) moments found · ~\(Int(parsed.recommendedDuration))s suggested. Tap to refine.",
+                body: "\(plan.segments.count) moments found · ~\(Int(plan.recommendedDuration))s suggested. Tap to refine.",
                 screen: "analysis"
             )
         }
 
         // CP1.3 — capture a Home-tile poster from the proxy's opening frame, then re-save with it.
-        let posterTime = parsed.segments.first(where: { $0.id == parsed.finalEditOrder.first })?.startSeconds ?? 0.5
+        let posterTime = plan.segments.first(where: { $0.id == plan.finalEditOrder.first })?.startSeconds ?? 0.5
         if let poster = await ThumbnailService.thumbnail(for: processed.url, at: posterTime) {
             projects.save(session: session, poster: poster)
         }
@@ -262,6 +324,42 @@ final class AnalysisCoordinator {
         }
 
         AnalysisJobStore.clear()   // job done + project saved — drop the kill-recovery record + durable proxy
+    }
+
+    /// DECIDE runs text-only via the proxy's SYNCHRONOUS `generate` op. Gemini 2.5 Pro finishes in ~40–60s
+    /// (well under the ~150s edge wall-clock), so no async job / self-bail is needed. (Claude Sonnet + thinking
+    /// scored a touch higher editorially but its ~150s runs time out on the free tier — parked in git history
+    /// for a future paid tier.)
+    private static let decideModel = "gemini-2.5-pro"
+
+    /// The two-call tail: PERCEIVE content-index JSON → normalize → DECIDE (text-only) → ADAPT → `ship`.
+    /// Shared by the live run and the kill-recovery resume. ADAPT produces the same `EditPlan` shape, so the
+    /// shipping tail (word-snap, b-roll repair, validator, EditPlanStore) is identical to the monolith path.
+    private func decideAndShip(indexRaw: String, styleBriefBlock: String, processed: ProcessedVideo,
+                               session: VideoSession, projects: ProjectService, resumed: Bool = false,
+                               words: [TranscriptionService.Word] = [], perceiveJobId: String) async throws {
+        let parsedIndex = try ContentIndex.parse(fromRawModelText: indexRaw)
+        let (index, normActions) = ContentIndexNormalizer.normalize(parsedIndex)
+        Log.gemini("PERCEIVE — \(index.shots.count) shots, \(index.talkSpans.count) talk_spans"
+                   + (normActions.isEmpty ? "" : " · normalized: " + normActions.joined(separator: ", ")))
+
+        // DECIDE — the text-only editor (Pro). Re-serialize the NORMALIZED index so DECIDE references the
+        // SAME shot ids ADAPT will use.
+        label = "Editing your video"; progress = 0.92
+        let indexJSON = (try? String(data: JSONEncoder().encode(index), encoding: .utf8)) ?? indexRaw
+        let decidePrompt = styleBriefBlock + DecidePrompt.body + "\n\n=== CONTENT INDEX ===\n" + indexJSON
+        // DECIDE — synchronous Gemini 2.5 Pro text-only call (no async job; ~40–60s fits under the edge cap).
+        let decideRaw = try await BackgroundActivity.run("vela-decide") {
+            try await GeminiService.shared.decide(prompt: decidePrompt, schema: DecidePrompt.schema, model: Self.decideModel)
+        }
+        let decisions = try EditDecisions.parse(fromRawModelText: decideRaw)
+        let (plan, warnings) = EditPlanAdapter.adapt(index: index, decisions: decisions)
+
+        // DECIDE ran ON-DEVICE (no server DECIDE job), so the client posts the "cut is ready" ping itself
+        // (`serverNotifies: false`). PERCEIVE was submitted with `notifyOnFinish: false`, so nothing double-pings.
+        try await ship(parsed: plan, processed: processed, session: session, projects: projects, resumed: resumed,
+                       prompt: decidePrompt, rawForCapture: decideRaw, jobId: perceiveJobId, words: words,
+                       adaptWarnings: warnings, spineIsVerbatim: true, serverNotifies: false)
     }
 
     // MARK: - Kill recovery (full app termination, not just backgrounding)
@@ -314,7 +412,18 @@ final class AnalysisCoordinator {
 
             let raw = try await pollUntilFinished(jobId: pending.jobId)
             if Task.isCancelled { return }
-            try await finalize(raw: raw, processed: processed, session: session, projects: projects, resumed: true)
+            // The persisted job is whichever first call ran (PERCEIVE for two-call, the edit-plan call for
+            // monolith). Resumed after a kill, style/brief are lost (DECIDE falls back to general judgement)
+            // and there's no transcript (no word-snap) — acceptable for kill-recovery.
+            if FeatureFlags.twoCallPipeline {
+                try await decideAndShip(indexRaw: raw, styleBriefBlock: styleBlock + briefBlock,
+                                        processed: processed, session: session, projects: projects,
+                                        resumed: true, perceiveJobId: pending.jobId)
+            } else {
+                let parsed = try EditPlan.parse(fromRawModelText: raw)
+                try await ship(parsed: parsed, processed: processed, session: session, projects: projects,
+                               resumed: true, prompt: nil, rawForCapture: raw, jobId: pending.jobId)
+            }
         } catch is CancellationError {
             return
         } catch {

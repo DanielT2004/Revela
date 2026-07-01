@@ -28,6 +28,11 @@ struct FoodEditorApp: App {
         AuthStore.runSelfTest()
         StyleTemplate.runSelfTest()
         FileTemplateStore.runSelfTest()
+        EditPlanValidator.selfCheck()   // Phase 1 — prints ✅/❌ to the console on every debug launch
+        EditPlanRepair.selfCheck()      // b-roll source-not-kept repair
+        WordSnapper.selfCheck()         // cuts snap to word boundaries — never mid-word
+        ContentIndexNormalizer.selfCheck()   // PERCEIVE index: split >15s shots, drop zero-len spans
+        EditPlanAdapter.selfCheck()     // DECIDE decisions + index → a valid EditPlan
         #endif
     }
 

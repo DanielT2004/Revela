@@ -23,6 +23,7 @@ enum GeminiError: LocalizedError {
     case uploadURLMissing
     case fileProcessingFailed
     case emptyResponse(String)
+    case truncated(String)
     case timedOut(String)
     case badRequest(String)
 
@@ -38,6 +39,8 @@ enum GeminiError: LocalizedError {
             return "Gemini failed to process the uploaded video."
         case .emptyResponse(let why):
             return "Gemini returned no usable text (\(why))."
+        case .truncated(let why):
+            return "Gemini's answer was cut off before it finished (\(why)). Try a shorter video or fewer clips."
         case .timedOut(let why):
             return "Timed out: \(why)"
         case .badRequest(let why):
@@ -55,7 +58,32 @@ enum GeminiError: LocalizedError {
 final class GeminiService: VideoAnalyzing {
     static let shared = GeminiService()
 
-    private let model = "gemini-2.5-flash"
+    /// The analysis model. Exposed statically so the eval-capture layer can record it in `meta.json`
+    /// without reaching into a private field.
+    static let modelID = "gemini-2.5-flash"
+
+    /// Hard ceiling on output tokens. `gemini-2.5-flash` tops out at 65,536; we now set it **explicitly**
+    /// so the long-video case gets maximum headroom and the JSON can't silently truncate. Two reasons it
+    /// matters here: (1) dense 5-min footage yields a large `segments` array; (2) 2.5's default *dynamic
+    /// thinking* tokens draw from this SAME budget, so leaving it implicit risks the model "thinking"
+    /// itself out of room to emit the JSON. Flows verbatim through the proxy to BOTH the on-device
+    /// `generate` and the async server job (the worker forwards the payload unchanged).
+    static let maxOutputTokens = 65_536
+
+    /// M0 "thinking lever": give the model a scratchpad to reason over the WHOLE video before it emits the
+    /// JSON — the cheap experiment for the single-pass b-roll/ordering problem (it reasons globally instead
+    /// of committing each decision left-to-right with no memory). 2.5-flash budget range is 0…24576; 8192
+    /// is a generous, controllable amount that sits well under `maxOutputTokens`. A/B against 0 in the lab.
+    static let thinkingBudget = 8_192
+
+    /// The decoding knobs, surfaced for `meta.json` so an eval bundle records exactly how the model was
+    /// configured for that run. Mirrors the values set in `generatePayload`.
+    static var configSummary: [String: Any] {
+        ["responseMimeType": "application/json", "temperature": 0, "topK": 1, "seed": 7,
+         "maxOutputTokens": maxOutputTokens, "thinkingBudget": thinkingBudget]
+    }
+
+    private let model = GeminiService.modelID
 
     private lazy var session: URLSession = {
         let cfg = URLSessionConfiguration.default
@@ -147,21 +175,57 @@ final class GeminiService: VideoAnalyzing {
                            prompt: prompt, schema: Self.responseSchema, model: model)
     }
 
+    /// PERCEIVE — the same async video job, but with an EXPLICIT response schema (the content-index schema),
+    /// so the decomposed pipeline reuses all the upload/poll machinery for its perception call. `notifyOnFinish`
+    /// is FALSE: PERCEIVE is only the first half of the two-call pipeline (DECIDE still follows), so the "cut is
+    /// ready" ping must NOT fire here — the client posts it after the on-device Gemini DECIDE ships.
+    func startAnalysisJob(fileURI: String, fileName: String, mimeType: String,
+                          prompt: String, schema: [String: Any]?, model: String? = nil) async throws -> String {
+        try await startJob(fileURI: fileURI, fileName: fileName, mimeType: mimeType,
+                           prompt: prompt, schema: schema, model: model, notifyOnFinish: false)
+    }
+
+    /// DECIDE — a TEXT-ONLY `generateContent` (no video) via the proxy's SYNCHRONOUS `generate` op. The editor
+    /// step of the two-call pipeline; `model` is `gemini-2.5-pro` (text-only, so it's cheap). The proxy's
+    /// `generate` op needs no `fileUri`, so this requires ZERO edge-function change.
+    func decide(prompt: String, schema: [String: Any]?, model: String, thinkingBudget: Int? = nil) async throws -> String {
+        let cfg = try proxyConfig()
+        let payload = Self.generatePayload(prompt: prompt, schema: schema, thinkingBudgetOverride: thinkingBudget)   // no fileURI → text-only
+        var req = try proxyRequest(cfg, op: "generate", fields: ["payload": payload, "model": model])
+        req.timeoutInterval = 120
+        Log.gemini("POST DECIDE (text-only, \(model)) via proxy…")
+        let t0 = Date()
+        let (data, resp) = try await session.data(for: req)
+        let http = resp as? HTTPURLResponse
+        Log.gemini("DECIDE HTTP \(http?.statusCode ?? -1) in \(String(format: "%.1f", Date().timeIntervalSince(t0)))s, \(data.count) bytes.")
+        guard http?.statusCode == 200 else {
+            throw GeminiError.http(http?.statusCode ?? -1, String(data: data, encoding: .utf8) ?? "")
+        }
+        return try Self.extractText(from: data)
+    }
+
     /// Kick off the server-side **style-extraction** job — same runner, but with NO response schema
-    /// (matches the on-device `rawStyleTemplateJSON`; `StyleProfileRaw` decodes defensively).
+    /// (matches the on-device `rawStyleTemplateJSON`; `StyleProfileRaw` decodes defensively). `notifyOnFinish`
+    /// is FALSE — style learning isn't the user-facing edit, so it must never push "cut is ready" (it posts its
+    /// own "style is ready" locally).
     func startStyleExtractionJob(fileURI: String, fileName: String, mimeType: String,
                                  prompt: String, model: String? = nil) async throws -> String {
         try await startJob(fileURI: fileURI, fileName: fileName, mimeType: mimeType,
-                           prompt: prompt, schema: nil, model: model)
+                           prompt: prompt, schema: nil, model: model, notifyOnFinish: false)
     }
 
     /// Shared body: POST `analyze` with the assembled payload (prompt + optional schema), return the jobId.
+    /// `notifyOnFinish` tells the server whether THIS job's completion is the finish (→ push "cut is ready").
+    /// True for the monolith edit-plan job; false for the two-call PERCEIVE call (DECIDE still follows) and
+    /// for style extraction (not a user-facing edit).
     private func startJob(fileURI: String, fileName: String, mimeType: String,
-                          prompt: String, schema: [String: Any]?, model: String?) async throws -> String {
+                          prompt: String, schema: [String: Any]?, model: String?,
+                          notifyOnFinish: Bool = true) async throws -> String {
         let cfg = try proxyConfig()
         let payload = Self.generatePayload(fileURI: fileURI, mimeType: mimeType, prompt: prompt, schema: schema)
         var fields: [String: Any] = ["fileUri": fileURI, "fileName": fileName, "mimeType": mimeType,
-                                     "payload": payload, "model": model ?? self.model]
+                                     "payload": payload, "model": model ?? self.model,
+                                     "notifyOnFinish": notifyOnFinish]
         // Attach the APNs token so the server can push when the job finishes while the app is closed.
         // Omitted when not yet registered (perms denied / pre-Push-capability) → server skips the push.
         // The env must match the `aps-environment` entitlement: development (sandbox) for dev builds.
@@ -408,7 +472,7 @@ final class GeminiService: VideoAnalyzing {
     /// schema). Extracted so the **async job** path (`startAnalysisJob`) ships Gemini the EXACT same
     /// request the on-device `generate` did — prompt + schema stay single-sourced here in Swift, and the
     /// Edge Function just forwards this verbatim.
-    static func generatePayload(fileURI: String, mimeType: String, prompt: String, schema: [String: Any]?) -> [String: Any] {
+    static func generatePayload(fileURI: String? = nil, mimeType: String = "video/mp4", prompt: String, schema: [String: Any]?, thinkingBudgetOverride: Int? = nil) -> [String: Any] {
         // temperature 0 + topK 1 = greedy decoding; a fixed seed makes Gemini best-effort return the SAME
         // output for the SAME input (prompt + video). Not bit-identical — the proxy is re-encoded each run
         // and 2.5-flash reasons over video — but far more consistent than before. Flows through the proxy
@@ -417,17 +481,18 @@ final class GeminiService: VideoAnalyzing {
             "responseMimeType": "application/json",
             "temperature": 0,
             "topK": 1,
-            "seed": 7
+            "seed": 7,
+            "maxOutputTokens": maxOutputTokens,
+            // Gemini thinking budget for this call; callers may override, but DECIDE/PERCEIVE keep the default.
+            "thinkingConfig": ["thinkingBudget": thinkingBudgetOverride ?? thinkingBudget]
         ]
         if let schema { generationConfig["responseSchema"] = schema }
+        // fileData only when there's a video — DECIDE is TEXT-ONLY (an empty fileData part is rejected by Google).
+        var parts: [[String: Any]] = []
+        if let fileURI, !fileURI.isEmpty { parts.append(["fileData": ["mimeType": mimeType, "fileUri": fileURI]]) }
+        parts.append(["text": prompt])
         return [
-            "contents": [[
-                "role": "user",
-                "parts": [
-                    ["fileData": ["mimeType": mimeType, "fileUri": fileURI]],
-                    ["text": prompt]
-                ]
-            ]],
+            "contents": [["role": "user", "parts": parts]],
             "generationConfig": generationConfig
         ]
     }
@@ -460,15 +525,25 @@ final class GeminiService: VideoAnalyzing {
             throw GeminiError.http(http?.statusCode ?? -1, String(data: data, encoding: .utf8) ?? "")
         }
 
+        return try Self.extractText(from: data)
+    }
+
+    /// Decode a generateContent response → the candidate text, surfacing block / truncation / empty with
+    /// named errors. Shared by the sync video `generate` and the text-only `decide` (DECIDE). A `MAX_TOKENS`
+    /// finish means the JSON was cut off mid-stream — reject it with a clear cause rather than let it surface
+    /// later as a confusing decode error.
+    static func extractText(from data: Data) throws -> String {
         let decoded = try JSONDecoder().decode(GenerateResponse.self, from: data)
-        if let block = decoded.promptFeedback?.blockReason {
-            throw GeminiError.emptyResponse("blocked: \(block)")
+        if let block = decoded.promptFeedback?.blockReason { throw GeminiError.emptyResponse("blocked: \(block)") }
+        let finish = decoded.candidates?.first?.finishReason
+        if let u = decoded.usageMetadata {
+            Log.gemini("Tokens — prompt \(u.promptTokenCount ?? -1), thoughts \(u.thoughtsTokenCount ?? 0), output \(u.candidatesTokenCount ?? -1), total \(u.totalTokenCount ?? -1). finishReason: \(finish ?? "—").")
         }
         let text = decoded.candidates?.first?.content?.parts?.compactMap { $0.text }.joined() ?? ""
-        guard !text.isEmpty else {
-            throw GeminiError.emptyResponse("finishReason: \(decoded.candidates?.first?.finishReason ?? "none")")
+        if finish == "MAX_TOKENS" {
+            throw GeminiError.truncated("output hit the \(maxOutputTokens)-token cap; the JSON is incomplete")
         }
-
+        guard !text.isEmpty else { throw GeminiError.emptyResponse("finishReason: \(finish ?? "none")") }
         Log.blob(.gemini, "RAW GEMINI RESPONSE", text)
         return text
     }
@@ -504,6 +579,15 @@ private struct GenerateResponse: Decodable {
         let finishReason: String?
     }
     struct PromptFeedback: Decodable { let blockReason: String? }
+    /// Token accounting. `thoughtsTokenCount` is the 2.5 *thinking* spend — it shares the output budget,
+    /// so watching it explains a surprise `MAX_TOKENS` truncation on a complex video.
+    struct UsageMetadata: Decodable {
+        let promptTokenCount: Int?
+        let candidatesTokenCount: Int?
+        let totalTokenCount: Int?
+        let thoughtsTokenCount: Int?
+    }
     let candidates: [Candidate]?
     let promptFeedback: PromptFeedback?
+    let usageMetadata: UsageMetadata?
 }

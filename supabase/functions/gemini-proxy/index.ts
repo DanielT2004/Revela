@@ -245,6 +245,7 @@ async function runJob(
   payload: unknown,
   model: string,
   key: string,
+  notifyOnSuccess: boolean,
 ): Promise<void> {
   const t0 = Date.now();
   const elapsed = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
@@ -323,7 +324,10 @@ async function runJob(
 
     await dbUpdateJob(jobId, { status: "done", result: out });
     console.log(`[runJob ${jobId}] done at ${elapsed()}, ${out.length} chars`);
-    await notifyJobFinished(jobId, true);
+    // Only push "cut is ready" when THIS job is the finish. In the two-call pipeline the PERCEIVE
+    // `analyze` job is only the first half (DECIDE still follows on-device), so the client sends
+    // notifyOnFinish=false for it — the client posts the ping itself after the on-device Gemini DECIDE ships.
+    if (notifyOnSuccess) await notifyJobFinished(jobId, true);
   } catch (e) {
     // Capture the REAL error so we can diagnose (the old code swallowed it into a generic message).
     const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
@@ -420,6 +424,10 @@ Deno.serve(async (req) => {
         // part of the validation gate: a tokenless client (perms denied / not yet registered) still runs.
         const deviceToken = typeof body.deviceToken === "string" && body.deviceToken ? body.deviceToken : null;
         const apnsEnv = body.apnsEnv === "production" ? "production" : "sandbox";
+        // Whether THIS job's completion is the finish (→ push "cut is ready"). Default true keeps the
+        // monolith correct; the two-call PERCEIVE call sends false (DECIDE still follows), and style
+        // extraction sends false (not a user-facing edit).
+        const notifyOnFinish = typeof body.notifyOnFinish === "boolean" ? body.notifyOnFinish : true;
         if (
           typeof fileUri !== "string" || !fileUri ||
           typeof fileName !== "string" || !fileName ||
@@ -442,7 +450,7 @@ Deno.serve(async (req) => {
           apns_env: apnsEnv,
         });
         // Keep the worker alive past this HTTP response — the job runs to completion server-side.
-        EdgeRuntime.waitUntil(runJob(jobId, fileName, payload, model, key));
+        EdgeRuntime.waitUntil(runJob(jobId, fileName, payload, model, key, notifyOnFinish));
         return json({ jobId });
       }
 

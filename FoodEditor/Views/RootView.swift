@@ -37,10 +37,8 @@ struct RootView: View {
                     BriefView()
                 case .processing:
                     ProcessingView()
-                case .analysisReveal:
-                    AnalysisRevealView()
                 case .segments:
-                    SegmentListView()
+                    FirstCutView()
                 case .editor:
                     EditorShellView()
                 case .hook:
@@ -165,7 +163,8 @@ struct RootView: View {
         let safe: Set<AppScreen> = [.home, .picker, .brief, .processing]
         guard safe.contains(router.screen) else { return }
         if analysis.phase == .done, session.store?.plan != nil {
-            router.go(.analysisReveal)
+            session.pendingReveal = true
+            router.go(.segments)
         } else if analysis.phase == .running {
             router.go(.processing)
         }
@@ -177,7 +176,8 @@ struct RootView: View {
         guard session.store?.plan != nil else { return }
         let safe: Set<AppScreen> = [.home, .processing, .picker, .brief]
         guard safe.contains(router.screen) else { return }
-        router.go(.analysisReveal)
+        session.pendingReveal = true
+        router.go(.segments)
     }
 
     /// Editor screens imply the project has advanced past triage.

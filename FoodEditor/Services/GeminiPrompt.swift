@@ -86,7 +86,7 @@ enum GeminiPrompt {
     - If a segment is only 1-2 seconds, still include it — short segments matter for hook detection.
     - When splitting a long talking-head section, split on TOPIC changes or complete-sentence boundaries — keep each complete thought together in one segment. Do NOT split in the middle of a sentence or a single point.
     - For any reaction segment, ask yourself: is the full duration valuable or just the first moment of reaction? If only the first moment matters, keep the segment but set trim_to_seconds to capture just that peak reaction moment and nothing after.
-  
+
     """
 
     /// PROMPT 1 — Style extraction (call 1). Watches ONE finished, already-edited video and reverse-engineers

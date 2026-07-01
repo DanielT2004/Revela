@@ -126,6 +126,11 @@ enum VideoPreprocessor {
         export.outputFileType = .mp4
         export.videoComposition = videoComposition
         export.shouldOptimizeForNetworkUse = true
+        // Cap the analysis proxy at ~40 MB — the exporter lowers the bitrate to fit while keeping the 720p
+        // resolution, so a high-bitrate 175 MB source becomes a ~30–40 MB proxy that encodes + uploads fast.
+        // The proxy is ONLY for AI analysis + the in-app preview; the final export cuts from the full-res
+        // originals (see `SourceSpan`), so the video the creator actually posts is unaffected.
+        export.fileLengthLimit = 40 * 1024 * 1024
 
         // Poll progress while the export runs.
         let progressTask = Task {

@@ -41,6 +41,11 @@ final class VideoSession {
     /// The furthest stage reached so far (only ever advances). Drives the switcher's ✓ marks.
     var furthestStage: EditorStage = .sort
 
+    /// One-shot "a fresh analysis just landed" flag. Set when routing to the results screen after
+    /// completion (RootView); consumed + cleared by `FirstCutView.onAppear` to show the celebratory
+    /// reveal curtain exactly once (never on Back-from-editor, which re-reads it already false).
+    var pendingReveal: Bool = false
+
     /// On a RESUMED project, the persisted source map (proxy-timeline → original PHAsset). Lets export
     /// re-resolve full-resolution originals from the camera roll. `nil` for a fresh session (whose
     /// `merged.sourceSpans` still point at on-disk temp originals). See `ExportSourceResolver`.
@@ -125,5 +130,6 @@ final class VideoSession {
         originSources = nil
         furthestStage = .sort
         editorStage = .sort
+        pendingReveal = false
     }
 }

@@ -201,8 +201,8 @@ struct ProcessingView: View {
     }
 
     // MARK: done (M4 — decoded summary + raw JSON)
-    // NOTE: superseded by `AnalysisRevealView` as the post-analysis screen (we route there on `.done`).
-    // Kept (currently unreached) as the raw-JSON inspection aid; safe to delete once no longer needed.
+    // NOTE: superseded by `FirstCutView` (+ its reveal curtain) as the post-analysis screen (we route to
+    // `.segments` on `.done`). Kept (currently unreached) as the raw-JSON inspection aid; safe to delete.
 
     private func doneState(_ plan: EditPlan, _ raw: String) -> some View {
         VStack(alignment: .leading, spacing: 14) {

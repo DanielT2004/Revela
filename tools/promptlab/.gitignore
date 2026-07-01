@@ -1,0 +1,6 @@
+# lab outputs and inputs are local-only — never commit videos, API output, or keys
+runs/
+fixtures/
+.env
+node_modules/
+*.mp4

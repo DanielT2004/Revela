@@ -32,6 +32,8 @@
 	<string>Vela needs access to your camera roll so you can pick raw food footage to edit.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Vela saves your finished, edited video back to your camera roll.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Vela transcribes your video's speech on your device so the AI can place cuts on real word boundaries instead of guessing.</string>
 	<key>SUPABASE_PROJECT_REF</key>
 	<string>$(SUPABASE_PROJECT_REF)</string>
 	<key>SUPABASE_ANON_KEY</key>

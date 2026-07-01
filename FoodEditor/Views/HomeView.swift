@@ -60,6 +60,10 @@ struct HomeView: View {
                             }
                         }
                     }
+
+                    #if DEBUG
+                    EvalDebugCard().padding(.top, 24)
+                    #endif
                 }
                 .padding(.horizontal, 22)
                 .padding(.top, 60)

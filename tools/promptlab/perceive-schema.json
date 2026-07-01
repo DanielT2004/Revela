@@ -1,0 +1,49 @@
+{
+  "type": "OBJECT",
+  "properties": {
+    "duration_seconds": { "type": "NUMBER" },
+    "video_summary": { "type": "STRING" },
+    "shots": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": {
+          "id": { "type": "INTEGER" },
+          "start_seconds": { "type": "NUMBER" },
+          "end_seconds": { "type": "NUMBER" },
+          "scene_type": { "type": "STRING", "enum": ["food-closeup", "talking-head", "bite-reaction", "plating", "ambiance", "wide-shot", "transition"] },
+          "description": { "type": "STRING" },
+          "depicts_subject": { "type": "STRING" },
+          "also_visible": { "type": "ARRAY", "items": { "type": "STRING" } },
+          "has_speech": { "type": "BOOLEAN" },
+          "section": { "type": "STRING", "enum": ["intro", "middle", "end"] },
+          "topic": { "type": "STRING" },
+          "hook_score": { "type": "INTEGER" },
+          "reaction_kind": { "type": "STRING", "enum": ["none", "bite", "first_taste", "verdict", "peak_reaction"] },
+          "quality_flags": { "type": "ARRAY", "items": { "type": "STRING", "enum": ["dead_air", "duplicate_take", "false_start", "camera_adjust", "audio_issue"] } },
+          "confidence": { "type": "NUMBER" }
+        },
+        "propertyOrdering": ["id", "start_seconds", "end_seconds", "scene_type", "description", "depicts_subject", "also_visible", "has_speech", "section", "topic", "hook_score", "reaction_kind", "quality_flags", "confidence"],
+        "required": ["id", "start_seconds", "end_seconds", "scene_type", "description", "depicts_subject", "also_visible", "has_speech", "section", "topic", "hook_score", "reaction_kind", "quality_flags", "confidence"]
+      }
+    },
+    "talk_spans": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": {
+          "start_seconds": { "type": "NUMBER" },
+          "end_seconds": { "type": "NUMBER" },
+          "spoken_text": { "type": "STRING" },
+          "references_subject": { "type": "STRING" },
+          "also_references": { "type": "ARRAY", "items": { "type": "STRING" } },
+          "is_to_camera": { "type": "BOOLEAN" }
+        },
+        "propertyOrdering": ["start_seconds", "end_seconds", "spoken_text", "references_subject", "also_references", "is_to_camera"],
+        "required": ["start_seconds", "end_seconds", "spoken_text", "references_subject", "also_references", "is_to_camera"]
+      }
+    }
+  },
+  "propertyOrdering": ["duration_seconds", "video_summary", "shots", "talk_spans"],
+  "required": ["duration_seconds", "video_summary", "shots", "talk_spans"]
+}

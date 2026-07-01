@@ -399,11 +399,11 @@ struct TimelineView: View {
         .frame(maxWidth: .infinity)
     }
 
-    // MARK: - One block (positioned + hold-to-reorder)
+    // MARK: - One block (positioned + grip-to-reorder)
 
-    /// Places the diffable `TimelineBlockView` at its computed top and attaches the hold-to-reorder
-    /// gesture. Lifting requires a ~0.3s long-press, so quick vertical drags pass through to the
-    /// ScrollView (smooth scrolling) and a quick tap still seeks the preview.
+    /// Places the diffable `TimelineBlockView` at its computed top. The reorder gesture lives on the
+    /// block's own right-hand grip (passed down as `onReorderChanged`/`onReorderEnded`), NOT on the full
+    /// row — so a vertical swipe anywhere else on the row scrolls the list and a tap seeks the preview.
     @ViewBuilder
     private func blockRow(_ clip: Clip, pTops: [UUID: CGFloat]) -> some View {
         if let store, let seg = store.segment(clip.sourceSegmentId) {
@@ -417,20 +417,20 @@ struct TimelineView: View {
                 isTrimming: trimming?.id == clip.id,
                 isDragging: dragging,
                 thumbnail: thumbs[clip.sourceSegmentId],
+                reorderSpace: timelineSpace,
                 onTapSeek: { seekPreview(to: clip.id) },
                 onCut: { cut(clip.sourceSegmentId) },
                 onMakeBroll: { makeBroll(clip.sourceSegmentId) },
                 onTrim: { dy in applyTrim(clip.id, dy: dy) },
-                onTrimEnd: { endTrim(clip.id) }
+                onTrimEnd: { endTrim(clip.id) },
+                onReorderChanged: { dy in beginOrUpdateReorder(clip.id, dy: dy) },
+                onReorderEnded: { endReorder() }
             )
             .frame(height: blockHeight(clip))
             .frame(maxWidth: .infinity)
             .offset(y: top)
             .zIndex(dragging ? 100 : 1)
             .animation(dragging ? nil : .spring(response: 0.32, dampingFraction: 0.82), value: top)
-            // simultaneousGesture (not .gesture) so a quick vertical swipe still scrolls the list;
-            // the long-press only "lifts" a clip after a hold, and scrollDisabled then stops the pan.
-            .simultaneousGesture(reorderGesture(clip.id))
         }
     }
 
@@ -545,43 +545,48 @@ struct TimelineView: View {
 
     // MARK: - Gestures
 
-    /// Hold (~0.3s) to lift a clip, then drag to reorder. Because lifting requires a long-press,
-    /// a quick vertical drag is never captured here — it falls through to the ScrollView.
-    private func reorderGesture(_ cid: UUID) -> some Gesture {
-        LongPressGesture(minimumDuration: 0.28)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(timelineSpace)))
-            .onChanged { value in
-                guard let store, case .second(true, let drag) = value else { return }
-                if draggingId != cid {
-                    draggingId = cid
-                    dropInsertion = store.order.firstIndex(where: { $0.id == cid })
-                    dragRawTranslation = 0; autoPanY = 0; dragTranslation = 0; dragScrollY = 0
-                    contentMinYAtLift = contentMinY
-                    UIImpactFeedbackGenerator(style: .rigid).impactOccurred()   // "lifted" cue
-                }
-                dragRawTranslation = drag?.translation.height ?? 0
-                dragTranslation = dragRawTranslation + autoPanY
-                updateInsertion()
-                driveAutoScroll(fingerY: draggedViewportCenter())
-            }
-            .onEnded { _ in
-                autoScroller.stop()
-                let pan = dragScrollY
-                guard let store, let did = draggingId, let ins = dropInsertion else {
-                    draggingId = nil; dropInsertion = nil; dragTranslation = 0; autoPanY = 0; dragScrollY = 0; return
-                }
-                store.reorder(cid: did, to: ins)
-                Log.app("🎞️ Reorder clip → index \(ins). \(store.vibeText)")
-                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                // Removing the manual offset would snap the list back to the pre-auto-scroll spot, so if we
-                // auto-scrolled, hand the position to the real ScrollView: scroll the dropped clip into view.
-                if abs(pan) > 1 {
-                    let n = max(2, Int((contentHeight / anchorPitch).rounded(.up)))
-                    let idx = max(0, min(Int(((tops(store.order)[did] ?? 0) / anchorPitch).rounded()), n - 1))
-                    scrollProxy?.scrollTo(AnchorID.row(idx), anchor: .center)
-                }
-                draggingId = nil; dropInsertion = nil; dragTranslation = 0; autoPanY = 0; dragScrollY = 0
-            }
+    // Grip-driven reorder. The reorder gesture lives ONLY on each block's dedicated right-hand grip
+    // (`TimelineBlockView.reorderGrip`), NEVER on the full row. A full-width gesture on scroll content
+    // starves the ScrollView's pan — as the finger sweeps a vertical scroll, every row it crosses arms a
+    // recognizer that contends for the touch, so the ScrollView never scrolls (that was the freeze).
+    // The grip's drag runs in the stable `.named(timelineSpace)` so the card's own drag `.offset` can't
+    // feed back into the translation (no jitter). These two callbacks are driven from the grip's
+    // DragGesture: `onChanged` reports the finger's vertical translation, `onEnded` commits the drop.
+
+    /// Lift (on first call) and track the grip drag. `dy` = the grip drag's vertical translation.
+    private func beginOrUpdateReorder(_ cid: UUID, dy: CGFloat) {
+        guard let store else { return }
+        if draggingId != cid {
+            draggingId = cid
+            dropInsertion = store.order.firstIndex(where: { $0.id == cid })
+            dragRawTranslation = 0; autoPanY = 0; dragTranslation = 0; dragScrollY = 0
+            contentMinYAtLift = contentMinY
+            UIImpactFeedbackGenerator(style: .rigid).impactOccurred()   // "lifted" cue
+        }
+        dragRawTranslation = dy
+        dragTranslation = dragRawTranslation + autoPanY
+        updateInsertion()
+        driveAutoScroll(fingerY: draggedViewportCenter())
+    }
+
+    /// Commit the drop and clear the lift.
+    private func endReorder() {
+        autoScroller.stop()
+        let pan = dragScrollY
+        guard let store, let did = draggingId, let ins = dropInsertion else {
+            draggingId = nil; dropInsertion = nil; dragTranslation = 0; autoPanY = 0; dragScrollY = 0; return
+        }
+        store.reorder(cid: did, to: ins)
+        Log.app("🎞️ Reorder clip → index \(ins). \(store.vibeText)")
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        // Removing the manual offset would snap the list back to the pre-auto-scroll spot, so if we
+        // auto-scrolled, hand the position to the real ScrollView: scroll the dropped clip into view.
+        if abs(pan) > 1 {
+            let n = max(2, Int((contentHeight / anchorPitch).rounded(.up)))
+            let idx = max(0, min(Int(((tops(store.order)[did] ?? 0) / anchorPitch).rounded()), n - 1))
+            scrollProxy?.scrollTo(AnchorID.row(idx), anchor: .center)
+        }
+        draggingId = nil; dropInsertion = nil; dragTranslation = 0; autoPanY = 0; dragScrollY = 0
     }
 
     /// Apply a measured content-scroll amount: refresh the dragged block's content-space delta and the
@@ -751,11 +756,16 @@ private struct TimelineBlockView: View {
     let isTrimming: Bool
     let isDragging: Bool
     let thumbnail: UIImage?
+    /// Named coordinate space (owned by the timeline ScrollView) the grip drag measures in, so the
+    /// card's own drag `.offset` can't feed back into the translation.
+    let reorderSpace: String
     let onTapSeek: () -> Void
     let onCut: () -> Void
     let onMakeBroll: () -> Void
     let onTrim: (CGFloat) -> Void
     let onTrimEnd: () -> Void
+    let onReorderChanged: (CGFloat) -> Void
+    let onReorderEnded: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -784,6 +794,7 @@ private struct TimelineBlockView: View {
                 Spacer(minLength: 0)
             }
             .frame(maxHeight: .infinity, alignment: .top)
+            reorderGrip
         }
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -823,6 +834,25 @@ private struct TimelineBlockView: View {
                 .background(Color.veSurface, in: Circle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// Dedicated reorder handle — drag vertically to reposition this clip. The reorder gesture lives
+    /// ONLY here (a small, full-height column on the right), never on the whole row, so the rest of the
+    /// card stays free for the ScrollView to pan — a full-width reorder gesture starved the scroll and
+    /// froze it. `.highPriorityGesture` so a drag that starts on the grip reorders instead of scrolling
+    /// (the trim handle uses the same pattern). The `minimumDistance` keeps a stray tap from lifting.
+    private var reorderGrip: some View {
+        Image(systemName: "line.3.horizontal")
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(isDragging ? Color.veTerracotta : Color.veFaintGray)
+            .frame(width: 30)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 2, coordinateSpace: .named(reorderSpace))
+                    .onChanged { onReorderChanged($0.translation.height) }
+                    .onEnded { _ in onReorderEnded() }
+            )
     }
 
     private func miniTag(_ text: String, fg: Color, bg: Color) -> some View {

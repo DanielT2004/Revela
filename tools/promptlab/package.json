@@ -1,0 +1,12 @@
+{
+  "name": "vela-promptlab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Off-device prompt lab for Vela: replay saved proxies against prompt/model/schema variants, score with a validator mirror + an LLM judge. Zero dependencies (Node 18+ global fetch).",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "run": "node run.mjs",
+    "judge": "node judge.mjs"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "_comment": "The lab's experiment matrix. Every video × prompt × model × schema cell is one run. Edit this, then `node run.mjs`. Drop proxy.mp4 files (from a shared VelaRuns bundle, or any food video) into fixtures/ and list them here.",
+
+  "videos": [
+    { "id": "howlins", "path": "proxy.mp4", "durationSeconds": 131.43 }
+  ],
+
+  "prompts": ["baseline.txt", "real-run.txt", "real-run-brollfix.txt"],
+
+  "models": ["gemini-2.5-flash"],
+
+  "schemaOn": [true],
+
+  "judge": {
+    "model": "gemini-2.5-pro",
+    "enabled": true
+  }
+}

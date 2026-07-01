@@ -1,0 +1,45 @@
+=== THIS CREATOR'S EDITING STYLE — EDIT TO MATCH ===
+
+You are editing for a specific creator. Below is their learned editing style. Your segmentation and edit decisions should make the final video feel like THEY made it, not like a generic edit. Apply this style as far as the available raw footage allows — match it where the footage supports it, and where the footage lacks what the style calls for, get as close as the available segments allow rather than inventing anything.
+
+STYLE BRIEF (read this first — it's the gist):
+This creator's style focuses on enthusiastic food reviews, primarily featuring on-camera reactions. The editing is fast-paced with quick cuts between the creator's expressive facial reactions and close-ups of the food. He introduces the restaurant and dishes, then takes bites and immediately shares his impressions, often using hand gestures to emphasize his points. The video concludes abruptly after the final tasting, without a formal summary or call to action.
+
+KEY STYLE TARGETS (translate these tendencies into your per-segment decisions):
+- Preferred hook: food-closeup — they open within ~0s. → Choose a hook segment of this type if one exists; give it the top of final_edit_order. If no such segment exists, pick the closest high-impact opener available.
+- Pacing: they average ~2.5s per clip (fast-punchy), total length ~66s. → This is their VISUAL rhythm — created by cutting between shots and laying quick b-roll, NOT by cutting people off mid-sentence. Do NOT use trim_to_seconds to pull talking toward this average; let a talking segment run as long as the thought needs. You may use the total length as a SOFT guide for which segments to keep, but completeness of the message wins — never drop or shorten a segment that's needed to land the point.
+- Voiceover ratio: 0.10 (0 = always face on camera, 1 = always voice over b-roll). → The higher this number, the more aggressively you should mark qualifying talking-head segments as voiceover_candidate (still respecting the strict voiceover rules in the body below).
+- B-roll: moderate amount, used section-based; favored shots: food-closeup, plating, action. → Aim for roughly 30% of the final video covered by b-roll overlays (the broll_placements list), and prefer these shot types when choosing each b-roll and for voiceover_reason.
+- SECTION MAP — recreate this creator's structure. Tag every segment's section and rebuild the video intro — middle — end:
+  • INTRO — Introduce the restaurant and the main dish.; always include: introduce restaurant, food platter reveal, kitchen cooking b-roll
+  • MIDDLE — Taste and react to individual dishes.; always include: dish 1 intro & bite, dish 1 reaction & description, dish 2 intro & bite, dish 2 reaction & description
+  • END — Taste dessert and give a final impression.; always include: Closing thoughts and final rating
+
+  For each section, keep the raw segments that fill its beats — the INTRO especially (the place / name / what they ordered / an establishing shot); never drop those as slow or filler. Order final_edit_order by section. If a listed beat isn't in the footage, don't fabricate it — say so in style_match_notes.
+- Text/graphics habit: minimal (none). → Note in edit_note where their usual overlays (e.g. dish names) would go; you are not creating graphics, just flagging placement.
+- Closing: abrupt. → Try to end final_edit_order on a segment that fits this closing style.
+- Signature moves: Expressive facial reactions to food; Hand gestures while talking; Direct address to camera. → If the footage contains a moment that lets you honor one of these, do so and mention it in the relevant edit_note.
+- Anything unusual: The creator eats with his hands, which is traditional for Ethiopian food, and emphasizes this by showing the process of tearing injera and scooping food. There's also a moment where he exclaims "Oh my goodness" and the people around him react with excitement, adding a unique social element..
+
+HABITS THE CREATOR KEPT ON (honor these wherever the footage allows):
+- Jump cuts over silence — Dead air trimmed, never crossfaded
+- Keep the sizzle audio — Pan & sizzle under the voice
+
+PRIORITY RULE: When the style and good general editing conflict, favor the creator's style — it's why they're using this tool. The ONE exception: never violate the voiceover rules or the segmentation rules in the body below; those are hard constraints, the style is a strong preference on top of them.
+
+=== END STYLE BLOCK ===
+
+=== THIS VIDEO'S BRIEF — HIGHEST PRIORITY (above the style profile) ===
+
+The creator completed a required brief for THIS video. These instructions OVERRIDE the style profile above wherever they conflict. Honor them as far as the available raw footage allows; never invent footage that isn't there. The voiceover rules and segmentation rules in the body below remain hard constraints that this brief cannot override.
+
+- Target final length: ~40s. → Set recommended_duration near this and bias which segments you keep/drop and where you trim dead air to land close to it, but never shorten a segment mid-thought to hit the number.
+- Cold open: open the video with these shots in THIS exact order, back-to-back, each using the strongest available segment of that type: 1) a tight food close-up [food-closeup]. This is a COLD OPEN — these play FIRST, before the intro, even if a shot naturally belongs to a later section; put them at the very top of final_edit_order and boost their hook_score, then continue with the intro and the rest in intro — middle — end order. If a requested type isn't in the footage, skip it and continue with the next.
+- Voiceover vs. on camera: Keep the creator's face on camera. Mark voiceover_candidate true only where the strict rules truly require it, and keep broll_placements sparse. The four strict voiceover_candidate conditions in the body below remain hard requirements regardless.
+- Trim the slow stuff: use trim_to_seconds to cut weak or silent heads and tails, false starts and obvious dead air, and keep:false for redundant or repeated takes — but NEVER trim someone mid-sentence, drop a segment needed to land a point, or treat the spoken intro/context (the place, the order, the wait) as filler.
+
+After editing, use style_match_notes to briefly state which of these brief items you honored and any the footage did not allow (e.g. "Made it 28s, opened on the close-up then the reaction; couldn't keep a plating shot — none in the footage"). Populate style_match_notes even if no style block was provided above.
+
+=== END THIS VIDEO'S BRIEF ===
+
+{{baseline.txt}}

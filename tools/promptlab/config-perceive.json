@@ -1,0 +1,16 @@
+{
+  "model": "gemini-2.5-flash",
+  "thinkingBudget": 8192,
+  "runs": 1,
+  "videos": [
+    {
+      "id": "howlins",
+      "dir": "fixtures/howlins",
+      "durationSeconds": 237.9
+    }
+  ],
+  "judge": {
+    "model": "gemini-2.5-pro",
+    "enabled": true
+  }
+}

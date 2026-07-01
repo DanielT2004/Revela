@@ -62,6 +62,11 @@ final class EditPlanStore {
     /// block, so the prompt and the cap agree.
     private let brollCoverageTarget: Double
 
+    /// When true (the two-call PERCEIVE→DECIDE pipeline), DECIDE owns the spine: `final_edit_order` is used as
+    /// the spine EXACTLY — no food-closeup extraction, and kept-but-unordered shots (b-roll sources) go to the
+    /// pool, NOT the spine. The monolith path keeps the legacy extraction. Set once in `init`.
+    private let spineIsVerbatim: Bool
+
     /// The **main spine** (Layer 1), in play order — each clip carries its own video + audio.
     /// (Seeded from `final_edit_order`, with food close-ups split off onto the B-roll layer.)
     var order: [Clip]
@@ -88,9 +93,10 @@ final class EditPlanStore {
     /// span read the cleaned file instead of the source; uncovered pieces still play the original.
     var useIsolatedAudio: Bool = false
 
-    init(plan: EditPlan, brollCoverageTarget: Double = 0.25, openerCount: Int = 0) {
+    init(plan: EditPlan, brollCoverageTarget: Double = 0.25, spineIsVerbatim: Bool = false) {
         self.plan = plan
         self.brollCoverageTarget = max(0, min(1, brollCoverageTarget))
+        self.spineIsVerbatim = spineIsVerbatim
         let byId: [Int: Segment] = Dictionary(plan.segments.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         self.segmentsById = byId
         func startOf(_ id: Int) -> Double { byId[id]?.startSeconds ?? 0 }
@@ -101,36 +107,14 @@ final class EditPlanStore {
                         outPoint: s?.trimToSeconds ?? s?.endSeconds ?? ((s?.startSeconds ?? 0) + 1))
         }
 
-        // keep:true segments, ordered by final_edit_order, with any stragglers appended.
+        // keep:true segments in the AI's final_edit_order, with any stragglers appended. We use the order
+        // VERBATIM — the AI owns the narrative sequence (cold-open → intro → tasting → verdict); code no
+        // longer re-sorts it (that section/topic re-sort is what scrambled the dishes + stranded the
+        // verdict after another dish). Code only ASSERTS: warn if the AI buried the intro, never re-order.
         let keepIds: [Int] = plan.segments.filter { $0.keep }.map(\.id)
-        var ordered: [Int] = plan.finalEditOrder.filter { keepIds.contains($0) }
-        for id in keepIds where !ordered.contains(id) { ordered.append(id) }
-        // COLD OPEN + section invariant. The first `openerCount` segments are the creator's chosen
-        // opener (Gemini was told to place them at the top of final_edit_order): PIN them to the very
-        // front — they play before the intro even if they're a mid-meal shot. The REST is stable-sorted
-        // intro → middle → end so the body still flows in order. A STABLE sort keeps the model's
-        // within-section order, so it only moves a mis-placed clip into its group. openerCount == 0 →
-        // everything is section-sorted (Gemini's hook, an intro segment, leads naturally).
-        func sectionRank(_ id: Int) -> Int {
-            switch byId[id]?.section ?? .unknown {
-            case .intro: return 0; case .middle: return 1; case .end: return 2; case .unknown: return 3
-            }
-        }
-        let pinCount = min(max(0, openerCount), ordered.count)
-        let pinned = Array(ordered.prefix(pinCount))
-        let sortedRest = ordered.dropFirst(pinCount).enumerated()
-            .sorted { a, b in
-                let ra = sectionRank(a.element), rb = sectionRank(b.element)
-                return ra != rb ? ra < rb : a.offset < b.offset
-            }
-            .map(\.element)
-        // CONTENT SECTIONS — pull same-`topic` clips (a dish, the verdict, …) into contiguous sections
-        // so the spine reads section-by-section. Sections order by upload appearance; the intro lead
-        // (`sortedRest.first`) stays the hook and keeps its section first. A plan with <2 topics is
-        // returned unchanged, so this preserves the section-sorted order above. See `TopicGrouping`.
-        let groupedRest = TopicGrouping.groupedOrder(sortedRest, segmentsById: byId, leadId: sortedRest.first)
-        ordered = pinned + groupedRest
-        let hook: Int? = ordered.first
+        let orderedKept: [Int] = plan.finalEditOrder.filter { keepIds.contains($0) }
+        let sources: [Int] = keepIds.filter { !orderedKept.contains($0) }   // kept but not ordered = b-roll sources
+        Self.warnIfIntroBuried(orderedKept, segmentsById: byId)
 
         // Legacy default b-roll for each voiceover candidate = highest-hook food-closeup elsewhere.
         var broll: [Int: Int] = [:]
@@ -142,18 +126,42 @@ final class EditPlanStore {
         }
         self.brollSource = broll
 
-        // Split the spine: food close-ups become B-roll material (Layer 2), except the hook.
-        let brollLayer: [Int] = ordered.filter { id in id != hook && isFoodCloseup(id) }
-        self.order = ordered.filter { !brollLayer.contains($0) }.map(clip)
-        // Group the B-roll pool by content section too (start-sorted, then grouped) so it reads
-        // section-by-section like the spine.
-        self.brollClips = TopicGrouping.groupedOrder(brollLayer.sorted { startOf($0) < startOf($1) },
-                                                     segmentsById: byId)
+        if spineIsVerbatim {
+            // DECIDE owns the spine: `final_edit_order` IS the spine, EXACTLY. Kept-but-unordered shots are
+            // b-roll SOURCES → the pool, never the spine. No food-closeup extraction (DECIDE already chose
+            // spine-vs-overlay), no straggler-append — so the edit is precisely what DECIDE decided.
+            self.order = orderedKept.map(clip)
+            self.brollClips = TopicGrouping.groupedOrder(sources.sorted { startOf($0) < startOf($1) }, segmentsById: byId)
+            self.hookId = orderedKept.first
+        } else {
+            // Monolith: append stragglers, then split food close-ups onto the B-roll layer (except the hook).
+            let ordered = orderedKept + sources
+            let hook = ordered.first
+            let brollLayer: [Int] = ordered.filter { id in id != hook && isFoodCloseup(id) }
+            self.order = ordered.filter { !brollLayer.contains($0) }.map(clip)
+            self.brollClips = TopicGrouping.groupedOrder(brollLayer.sorted { startOf($0) < startOf($1) }, segmentsById: byId)
+            self.hookId = hook
+        }
         self.cutTray = plan.segments.filter { !$0.keep }.map(\.id)
-        self.hookId = hook
         self.brollLane = []
         // Auto-fill the overlay layer from Gemini's suggested placements (needs the stored props above).
         self.brollLane = seededLane(fromPlacements: plan.brollPlacements)
+    }
+
+    // MARK: - Order sanity (assert, never re-sort)
+
+    /// The AI owns the play order — `final_edit_order` is used VERBATIM. This is a NON-MUTATING discipline
+    /// check: if an `.intro` clip lands AFTER the tasting/verdict has begun (a `.middle`/`.end` clip), the
+    /// narrative arc is broken (the old "restaurant intro buried in the middle"). We LOG it so a bad AI
+    /// order is visible in the console — we NEVER re-sort (that re-sort is exactly what used to scramble the
+    /// dishes + strand the verdict). A normal cold-open teaser is intro/unknown, so it never trips this.
+    static func warnIfIntroBuried(_ ordered: [Int], segmentsById: [Int: Segment]) {
+        func section(_ id: Int) -> VideoSection { segmentsById[id]?.section ?? .unknown }
+        guard let firstBody = ordered.firstIndex(where: { section($0) == .middle || section($0) == .end })
+        else { return }
+        let buried = ordered[(firstBody + 1)...].filter { section($0) == .intro }
+        guard !buried.isEmpty else { return }
+        Log.gemini("⚠️ Order check — \(buried.count) intro clip(s) \(buried) play AFTER the tasting/verdict began (AI buried the intro). Using the AI's order verbatim anyway — not re-sorting.")
     }
 
     // MARK: - Persistence (save / resume)
@@ -739,29 +747,26 @@ final class EditPlanStore {
     /// spine, the B-roll layer, trims, and the auto-filled overlays. Everything stays reversible.
     func applyAISuggestions() {
         let keepIds = plan.segments.filter { $0.keep }.map(\.id)
-        var ordered = plan.finalEditOrder.filter { keepIds.contains($0) }
-        for id in keepIds where !ordered.contains(id) { ordered.append(id) }
+        let orderedKept = plan.finalEditOrder.filter { keepIds.contains($0) }
+        let sources = keepIds.filter { !orderedKept.contains($0) }   // kept but not ordered = b-roll sources
 
-        // Open with the AI's strongest hook among the kept clips.
-        if let bestHook = plan.segments
-            .filter({ keepIds.contains($0.id) })
-            .max(by: { $0.hookScore < $1.hookScore }) {
-            ordered.removeAll { $0 == bestHook.id }
-            ordered.insert(bestHook.id, at: 0)
-            hookId = bestHook.id
+        // The AI's order, VERBATIM (same as the initial build) — "Accept Vela's picks" shows exactly the
+        // AI's suggested sequence; code never re-sorts it, only warns if the intro got buried.
+        Self.warnIfIntroBuried(orderedKept, segmentsById: segmentsById)
+
+        if spineIsVerbatim {
+            // DECIDE owns the spine: final_edit_order EXACTLY; b-roll sources → the pool, not the spine.
+            order = orderedKept.map(makeClip)
+            brollClips = TopicGrouping.groupedOrder(sources.sorted { rawStart($0) < rawStart($1) }, segmentsById: segmentsById)
+            hookId = orderedKept.first
         } else {
+            let ordered = orderedKept + sources
             hookId = ordered.first
+            let currentHook = hookId
+            let brollLayer: [Int] = ordered.filter { id in id != currentHook && isFoodCloseup(id) }
+            order = ordered.filter { !brollLayer.contains($0) }.map(makeClip)
+            brollClips = TopicGrouping.groupedOrder(brollLayer.sorted { rawStart($0) < rawStart($1) }, segmentsById: segmentsById)
         }
-
-        // Pull same-`topic` clips into contiguous content sections (hook's section stays first). A plan
-        // with <2 topics is returned unchanged, preserving the hook-first order above.
-        ordered = TopicGrouping.groupedOrder(ordered, segmentsById: segmentsById, leadId: hookId)
-
-        let currentHook = hookId
-        let brollLayer: [Int] = ordered.filter { id in id != currentHook && isFoodCloseup(id) }
-        order = ordered.filter { !brollLayer.contains($0) }.map(makeClip)
-        brollClips = TopicGrouping.groupedOrder(brollLayer.sorted { rawStart($0) < rawStart($1) },
-                                                segmentsById: segmentsById)
         cutTray = plan.segments.filter { !$0.keep }.map(\.id)
         brollLane = seededLane(fromPlacements: plan.brollPlacements)
 

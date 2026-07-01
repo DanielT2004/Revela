@@ -150,6 +150,46 @@ struct HomeButton: View {
     }
 }
 
+/// A small 10-segment meter visualizing `hook_score` / 10 (the AI's relative read of an opener's
+/// scroll-stop strength across THIS creator's footage). Shared by the Hook Spotlight and the post-
+/// analysis recap so both render one implementation. Set `showLabel: false` for the compact runner-up form.
+struct HookScoreMeter: View {
+    let score: Double
+    var showLabel: Bool = true
+    private var filled: Int { max(0, min(10, Int(score.rounded()))) }
+    var body: some View {
+        HStack(spacing: 5) {
+            if showLabel {
+                Text("HOOK")
+                    .font(VeFont.sans(9.5, weight: .bold)).tracking(0.5)
+                    .foregroundStyle(Color.veFaintGray)
+            }
+            HStack(spacing: 2) {
+                ForEach(0..<10, id: \.self) { i in
+                    Capsule()
+                        .fill(i < filled ? Color.veTerracotta : Color.veSurface)
+                        .frame(width: 5, height: 9)
+                }
+            }
+            Text("\(filled)/10")
+                .font(VeFont.sans(11, weight: .bold))
+                .foregroundStyle(Color.veWarmGray)
+        }
+    }
+}
+
+/// Small dark "#n" rank pill overlaid on a hook/candidate thumbnail. Shared by Hook Spotlight + recap.
+struct RankBadge: View {
+    let rank: Int
+    var body: some View {
+        Text("#\(rank)")
+            .font(VeFont.serif(15))
+            .foregroundStyle(.white)
+            .frame(width: 30, height: 30)
+            .background(.black.opacity(0.42), in: Circle())
+    }
+}
+
 /// Brief charcoal toast pinned near the bottom (mirrors the mockup's toast).
 struct ToastView: View {
     let text: String

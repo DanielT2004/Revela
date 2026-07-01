@@ -25,6 +25,7 @@ struct EditBrief: Equatable {
 
     var lengthSeconds: Int = 30          // → recommended_duration (slider 10…180)
     var hookSequence: [HookShot] = []    // ordered openers → top of final_edit_order + hook_score
+    var maxScrollStopHook: Bool = true   // ON by default: AI opens on the most arresting moment (overrides hookSequence); creators toggle OFF for a fixed opener
     var brollLean: BrollLean = .balanced // → voiceover_candidate leaning + broll_placements coverage
     var keepBeats: Set<KeepBeat> = []    // → keep:true + sensible placement
     var trimSlowParts: Bool = true       // → trim_to_seconds on weak heads/tails + keep:false on filler

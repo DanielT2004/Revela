@@ -1,0 +1,51 @@
+{
+  "type": "OBJECT",
+  "properties": {
+    "video_summary": { "type": "STRING" },
+    "recommended_hook": { "type": "STRING" },
+    "recommended_duration": { "type": "NUMBER" },
+    "final_edit_order": { "type": "ARRAY", "items": { "type": "INTEGER" } },
+    "style_match_notes": { "type": "STRING", "nullable": true },
+    "segments": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": {
+          "id": { "type": "INTEGER" },
+          "start_seconds": { "type": "NUMBER" },
+          "end_seconds": { "type": "NUMBER" },
+          "scene_type": { "type": "STRING", "enum": ["food-closeup", "talking-head", "bite-reaction", "plating", "ambiance", "wide-shot", "transition"] },
+          "description": { "type": "STRING" },
+          "hook_score": { "type": "NUMBER" },
+          "keep": { "type": "BOOLEAN" },
+          "trim_to_seconds": { "type": "NUMBER", "nullable": true },
+          "voiceover_candidate": { "type": "BOOLEAN" },
+          "voiceover_reason": { "type": "STRING", "nullable": true },
+          "confidence": { "type": "NUMBER" },
+          "edit_note": { "type": "STRING" },
+          "section": { "type": "STRING", "enum": ["intro", "middle", "end"] },
+          "topic": { "type": "STRING" }
+        },
+        "propertyOrdering": ["id", "start_seconds", "end_seconds", "scene_type", "description", "hook_score", "keep", "trim_to_seconds", "voiceover_candidate", "voiceover_reason", "confidence", "edit_note", "section", "topic"],
+        "required": ["id", "start_seconds", "end_seconds", "scene_type", "description", "hook_score", "keep", "trim_to_seconds", "voiceover_candidate", "voiceover_reason", "confidence", "edit_note", "section", "topic"]
+      }
+    },
+    "broll_placements": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": {
+          "over_segment_id": { "type": "INTEGER" },
+          "broll_segment_id": { "type": "INTEGER" },
+          "start_offset_seconds": { "type": "NUMBER" },
+          "duration_seconds": { "type": "NUMBER" },
+          "reason": { "type": "STRING", "nullable": true }
+        },
+        "propertyOrdering": ["over_segment_id", "broll_segment_id", "start_offset_seconds", "duration_seconds", "reason"],
+        "required": ["over_segment_id", "broll_segment_id", "start_offset_seconds", "duration_seconds", "reason"]
+      }
+    }
+  },
+  "propertyOrdering": ["video_summary", "recommended_hook", "recommended_duration", "final_edit_order", "style_match_notes", "segments", "broll_placements"],
+  "required": ["video_summary", "recommended_hook", "recommended_duration", "final_edit_order", "style_match_notes", "segments", "broll_placements"]
+}

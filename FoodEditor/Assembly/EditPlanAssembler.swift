@@ -154,9 +154,10 @@ enum EditPlanAssembler {
 
         Log.assembly("Assembling \(slots.count) slot(s) → \(Int(renderSize.width))×\(Int(renderSize.height)) 9:16…")
 
+        var skipped = 0   // slots that produced no video (too short, or no mappable footage)
         for slot in slots {
             let dur = slot.duration
-            guard dur > 0.04 else { continue }
+            guard dur > 0.04 else { skipped += 1; continue }
 
             let slotStart = cursor
             let srcLen = dur * slot.videoSpeed
@@ -180,6 +181,7 @@ enum EditPlanAssembler {
             }
             let insertedLen = CMTimeSubtract(unscaledCursor, slotStart)
             guard insertedLen.seconds > 0.01 else {
+                skipped += 1
                 Log.assembly("Slot @\(String(format: "%.1f", CMTimeGetSeconds(slotStart)))s: no mappable video — skipped.")
                 continue
             }
@@ -210,17 +212,31 @@ enum EditPlanAssembler {
         await buildAudioTrack(store.baseAudioPieces(), isolated: store.useIsolatedAudio)
         await buildAudioTrack(store.overlayAudioPieces(), isolated: false)
 
+        // Drop any degenerate (zero/negative-length) instruction — AVFoundation rejects the WHOLE
+        // video composition ("Operation Stopped") if even one slips in.
+        instructions = instructions.filter { CMTimeCompare($0.timeRange.duration, .zero) > 0 }
+        // A video composition MUST span the composition's full duration. If an audio track outruns the
+        // video track (e.g. a slot's video was skipped while its audio still plays), the last
+        // instruction ends short of `composition.duration` and the export is rejected at validation.
+        // Extend the final instruction to cover the tail (freeze the last frame under the trailing
+        // audio) so the composition we hand the exporter is always valid.
+        let fullDuration = composition.duration
+        if let last = instructions.last, CMTimeCompare(fullDuration, last.timeRange.end) > 0 {
+            Log.assembly("Video ends at \(String(format: "%.2f", last.timeRange.end.seconds))s but composition runs \(String(format: "%.2f", fullDuration.seconds))s — extending last frame to cover the audio tail.")
+            last.timeRange = CMTimeRange(start: last.timeRange.start, end: fullDuration)
+        }
+
         let videoComposition = AVMutableVideoComposition()
         videoComposition.renderSize = renderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
         videoComposition.instructions = instructions
 
         // ---- TEXT: burn captions in via a Core-Animation layer over the composited video ----
+        var burned = 0
         if !store.textOverlays.isEmpty {
             let parent = CALayer(); parent.frame = CGRect(origin: .zero, size: renderSize)
             let videoLayer = CALayer(); videoLayer.frame = parent.frame
             parent.addSublayer(videoLayer)
-            var burned = 0
             for o in store.textOverlays {
                 if let l = TextOverlayRenderer.layer(for: o, renderSize: renderSize) { parent.addSublayer(l); burned += 1 }
             }
@@ -229,6 +245,16 @@ enum EditPlanAssembler {
                 Log.assembly("Burned \(burned) text overlay(s) into the export.")
             }
         }
+
+        // ---- Coverage report: the numbers that pin down an "Operation Stopped" export rejection. ----
+        let audioDurations = composition.tracks(withMediaType: .audio)
+            .map { String(format: "%.2f", $0.timeRange.duration.seconds) }
+            .joined(separator: ", ")
+        Log.assembly("""
+        Export coverage → video \(String(format: "%.2f", cursor.seconds))s · composition \(String(format: "%.2f", composition.duration.seconds))s · \
+        audio [\(audioDurations)]s · instructions \(instructions.count) [\(String(format: "%.2f", instructions.first?.timeRange.start.seconds ?? -1))–\(String(format: "%.2f", instructions.last?.timeRange.end.seconds ?? -1))s] · \
+        slotsSkipped \(skipped) · textOverlays \(store.textOverlays.count) (burned \(burned)).
+        """)
 
         guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
             throw AssemblyError.exportInit
@@ -262,6 +288,10 @@ enum EditPlanAssembler {
         onProgress(1)
 
         guard export.status == .completed else {
+            if let err = export.error as NSError? {
+                Log.assembly("❌ Export session failed — domain=\(err.domain) code=\(err.code): \(err.localizedDescription)")
+                Log.assembly("   userInfo: \(err.userInfo)")
+            }
             throw AssemblyError.exportFailed(export.error?.localizedDescription ?? "status \(export.status.rawValue)")
         }
         let size = ((try? FileManager.default.attributesOfItem(atPath: outURL.path))?[.size] as? NSNumber)?.int64Value ?? 0

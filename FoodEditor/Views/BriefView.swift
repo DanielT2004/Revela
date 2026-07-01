@@ -197,6 +197,9 @@ struct BriefView: View {
                     Spacer(); lengthTag("In-depth", .indepth)
                 }
                 .padding(.top, 4)
+                Text("Tip: ~25–35s tends to perform best for food reviews.")
+                    .font(VeFont.sans(11)).foregroundStyle(Color.veFaintGray)
+                    .padding(.top, 10)
             }
             .padding(16)
             .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -214,15 +217,30 @@ struct BriefView: View {
     // MARK: how it opens — ordered multi-select (back-to-back)
 
     private var hookSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
+            // Opt-in: let the AI open on the single most arresting moment (more scroll-stopping; overrides the chips).
+            Toggle(isOn: Binding(get: { brief.maxScrollStopHook }, set: { brief.maxScrollStopHook = $0 })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Max scroll-stop").font(VeFont.sans(14, weight: .semibold)).foregroundStyle(Color.veCharcoal)
+                    Text("Let the AI open on your single most attention-grabbing moment.")
+                        .font(VeFont.sans(12)).foregroundStyle(Color.veWarmGray)
+                }
+            }
+            .tint(Color.veTerracotta)
+
             BriefFlowLayout(spacing: 8, lineSpacing: 8) {
                 ForEach(HookShot.allCases, id: \.self) { shot in
                     BriefHookChip(label: shot.label, order: hookOrder(shot)) { toggleHook(shot) }
                 }
             }
-            Text(brief.hookSequence.isEmpty
-                 ? "Leave empty to let the AI pick the strongest opener."
-                 : "Plays back-to-back in this order.")
+            .opacity(brief.maxScrollStopHook ? 0.35 : 1)
+            .disabled(brief.maxScrollStopHook)
+
+            Text(brief.maxScrollStopHook
+                 ? "The AI opens on the most scroll-stopping moment, then teases the payoff."
+                 : (brief.hookSequence.isEmpty
+                    ? "Leave empty to let the AI pick the strongest opener."
+                    : "Plays back-to-back in this order."))
                 .font(VeFont.sans(12)).foregroundStyle(Color.veFaintGray)
         }
     }

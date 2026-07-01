@@ -75,7 +75,7 @@ struct HookSpotlightView: View {
                 ZStack(alignment: .topLeading) {
                     thumb(seg)
                     HStack(spacing: 6) {
-                        rankBadge(rank)
+                        RankBadge(rank: rank)
                         Spacer()
                         if isHook {
                             HStack(spacing: 4) {
@@ -99,7 +99,7 @@ struct HookSpotlightView: View {
                     HStack(spacing: 8) {
                         SceneChip(text: seg.sceneType.label)
                         Spacer()
-                        hookScoreMeter(seg.hookScore)
+                        HookScoreMeter(score: seg.hookScore)
                     }
                     if !seg.description.isEmpty {
                         Text(seg.description)
@@ -135,34 +135,6 @@ struct HookSpotlightView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
-    }
-
-    private func rankBadge(_ rank: Int) -> some View {
-        Text("#\(rank)")
-            .font(VeFont.serif(15))
-            .foregroundStyle(.white)
-            .frame(width: 30, height: 30)
-            .background(.black.opacity(0.42), in: Circle())
-    }
-
-    /// A small 10-segment meter visualizing hook_score / 10.
-    private func hookScoreMeter(_ score: Double) -> some View {
-        let filled = Int(score.rounded())
-        return HStack(spacing: 5) {
-            Text("HOOK")
-                .font(VeFont.sans(9.5, weight: .bold)).tracking(0.5)
-                .foregroundStyle(Color.veFaintGray)
-            HStack(spacing: 2) {
-                ForEach(0..<10, id: \.self) { i in
-                    Capsule()
-                        .fill(i < filled ? Color.veTerracotta : Color.veSurface)
-                        .frame(width: 5, height: 9)
-                }
-            }
-            Text("\(filled)/10")
-                .font(VeFont.sans(11, weight: .bold))
-                .foregroundStyle(Color.veWarmGray)
-        }
     }
 
     private func loadThumbnails() async {

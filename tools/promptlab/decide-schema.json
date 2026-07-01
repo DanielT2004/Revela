@@ -1,0 +1,56 @@
+{
+  "type": "OBJECT",
+  "properties": {
+    "recommended_duration": { "type": "NUMBER" },
+    "recommended_hook": { "type": "STRING" },
+    "hook_id": { "type": "INTEGER" },
+    "cold_open": { "type": "ARRAY", "items": { "type": "INTEGER" } },
+    "final_edit_order": { "type": "ARRAY", "items": { "type": "INTEGER" } },
+    "trims": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": { "shot_id": { "type": "INTEGER" }, "trim_to_seconds": { "type": "NUMBER" }, "reason": { "type": "STRING" } },
+        "propertyOrdering": ["shot_id", "trim_to_seconds", "reason"],
+        "required": ["shot_id", "trim_to_seconds", "reason"]
+      }
+    },
+    "voiceovers": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": { "shot_id": { "type": "INTEGER" }, "reason": { "type": "STRING" } },
+        "propertyOrdering": ["shot_id", "reason"],
+        "required": ["shot_id", "reason"]
+      }
+    },
+    "broll_placements": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": {
+          "over_shot_id": { "type": "INTEGER" },
+          "broll_shot_id": { "type": "INTEGER" },
+          "start_offset_seconds": { "type": "NUMBER" },
+          "duration_seconds": { "type": "NUMBER" },
+          "reason": { "type": "STRING" }
+        },
+        "propertyOrdering": ["over_shot_id", "broll_shot_id", "start_offset_seconds", "duration_seconds", "reason"],
+        "required": ["over_shot_id", "broll_shot_id", "start_offset_seconds", "duration_seconds", "reason"]
+      }
+    },
+    "edit_notes": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": { "shot_id": { "type": "INTEGER" }, "note": { "type": "STRING" } },
+        "propertyOrdering": ["shot_id", "note"],
+        "required": ["shot_id", "note"]
+      }
+    },
+    "style_match_notes": { "type": "STRING" },
+    "video_summary": { "type": "STRING" }
+  },
+  "propertyOrdering": ["recommended_duration", "recommended_hook", "hook_id", "cold_open", "final_edit_order", "trims", "voiceovers", "broll_placements", "edit_notes", "style_match_notes", "video_summary"],
+  "required": ["recommended_duration", "recommended_hook", "hook_id", "cold_open", "final_edit_order", "trims", "voiceovers", "broll_placements", "edit_notes", "style_match_notes", "video_summary"]
+}

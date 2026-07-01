@@ -1,0 +1,10 @@
+=== OVERRIDE (highest priority — applies on top of everything above) ===
+
+B-ROLL SOURCE INTEGRITY (this fixes a recurring, costly failure). Every segment id you put in broll_placements as broll_segment_id MUST be a segment whose "keep" is true. NEVER use a segment you marked keep:false as a b-roll source — the editor DROPS cut segments, so a placement that points at a cut clip silently produces NO overlay at all, and the b-roll you intended simply never appears.
+
+Apply this in the order you build the JSON:
+1) When planning b-roll, FIRST choose which non-talking-head clips you will reuse as overlay visuals. Those clips MUST be kept (keep:true) — even if they do not appear in final_edit_order. A clip may be kept SOLELY to serve as a b-roll source.
+2) Before you finish, RE-CHECK every broll_placements entry. If its broll_segment_id is keep:false, you MUST fix it: either (a) re-point it to a DIFFERENT kept clip with the SAME topic that depicts the same thing, or (b) flip that source clip to keep:true. Prefer (a) when an equally good kept clip of the same topic already exists.
+3) A kept-for-b-roll clip does NOT need to be in final_edit_order. final_edit_order is the spoken spine; b-roll sources are a separate visual pool that plays silently over the spine.
+
+Concretely: if you describe a dish in a talking segment and the best matching close-up is a clip you would otherwise cut to save time, do NOT cut it — keep it as the b-roll source, or point the overlay at another kept close-up of that SAME dish/topic. The whole point of b-roll is to cover the face with what is being talked about, so the source must survive into the edit.

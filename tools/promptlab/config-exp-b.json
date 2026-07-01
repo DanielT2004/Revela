@@ -1,0 +1,8 @@
+{
+  "models": [ "gemini-2.5-pro" ],
+  "runs": 3,
+  "videos": [
+    { "id": "howlins-loosehook", "dir": "fixtures/howlins-loosehook", "indexPath": "runs/howlins/perceive__gemini-2.5-flash__run1/index.json", "durationSeconds": 237.9 }
+  ],
+  "judge": { "enabled": false }
+}

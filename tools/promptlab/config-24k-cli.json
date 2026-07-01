@@ -1,0 +1,15 @@
+{
+  "models": [
+    { "model": "claude-sonnet-4-6", "thinkingBudget": 24000, "label": "sonnet-24k-cli" }
+  ],
+  "runs": 3,
+  "videos": [
+    {
+      "id": "howlins",
+      "dir": "fixtures/howlins",
+      "indexPath": "runs/howlins/perceive__gemini-2.5-flash__run1/index.json",
+      "durationSeconds": 237.9
+    }
+  ],
+  "judge": { "enabled": false }
+}
