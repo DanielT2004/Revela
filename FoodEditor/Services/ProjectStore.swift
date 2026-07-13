@@ -39,8 +39,15 @@ protocol ProjectStore {
     /// Where this project's proxy is (or would be) persisted — the durable copy that outlives a session's
     /// scratch/PendingAnalysis files. Pure path math; doesn't require the file to exist.
     func proxyURL(for id: UUID) -> URL
+    /// Where this project's recorded voiceover takes live (`narration/` inside the project folder).
+    /// Pure path math; the recorder creates the directory on first use, and `delete(id:)` removes it
+    /// with the rest of the folder.
+    func narrationDirectory(for id: UUID) -> URL
     /// The saved poster image for a project's Home tile, if one was written.
     func posterImage(for id: UUID) -> UIImage?
+    /// Where this project's Home-tile poster is (or would be) persisted — pure path math, so callers can read
+    /// + decode it off the main thread. Nil when the file doesn't exist.
+    func posterURL(for id: UUID) -> URL?
     func delete(id: UUID) throws
 }
 
@@ -156,10 +163,19 @@ final class FileProjectStore: ProjectStore {
     /// Protocol-facing proxy location (delegates to the private path helper).
     func proxyURL(for id: UUID) -> URL { proxyURL(id) }
 
+    func narrationDirectory(for id: UUID) -> URL {
+        folder(id).appendingPathComponent("narration", isDirectory: true)
+    }
+
     func posterImage(for id: UUID) -> UIImage? {
         let url = posterURL(id)
         guard fm.fileExists(atPath: url.path), let data = try? Data(contentsOf: url) else { return nil }
         return UIImage(data: data)
+    }
+
+    func posterURL(for id: UUID) -> URL? {
+        let url = posterURL(id)
+        return fm.fileExists(atPath: url.path) ? url : nil
     }
 
     func delete(id: UUID) throws {

@@ -18,9 +18,9 @@ private func strokeCircle(_ ctx: GraphicsContext, _ cx: Double, _ cy: Double, _ 
     ctx.stroke(Path(ellipseIn: rect), with: .color(color), style: StrokeStyle(lineWidth: w * k))
 }
 
-/// The little icon on the left of each timeline track (Text / Main / B-roll / Audio).
+/// The little icon on the left of each timeline track (Text / Main / B-roll / Voiceover / Audio).
 struct TrackIcon: View {
-    enum Kind { case text, main, broll, audio }
+    enum Kind { case text, main, broll, narration, audio }
     let kind: Kind
     var color: Color = .veFaintGray
     var side: CGFloat = 12
@@ -39,6 +39,13 @@ struct TrackIcon: View {
             case .broll:                                  // stacked layers (diamond)
                 strokeSeg(ctx, [(12, 3), (21, 8), (12, 13), (3, 8)], 1.6, k: k, color: color, closed: true)
                 strokeSeg(ctx, [(3, 13), (12, 18), (21, 13)], 1.6, k: k, color: color)
+            case .narration:                              // microphone: capsule + cradle + stem
+                ctx.stroke(Path(roundedRect: CGRect(x: 9 * k, y: 3 * k, width: 6 * k, height: 10 * k), cornerRadius: 3 * k),
+                           with: .color(color), style: StrokeStyle(lineWidth: 1.8 * k))
+                var cradle = Path(); cradle.move(to: CGPoint(x: 6 * k, y: 11 * k))
+                cradle.addQuadCurve(to: CGPoint(x: 18 * k, y: 11 * k), control: CGPoint(x: 12 * k, y: 18 * k))
+                ctx.stroke(cradle, with: .color(color), style: StrokeStyle(lineWidth: 1.8 * k, lineCap: .round))
+                strokeSeg(ctx, [(12, 15), (12, 20)], 1.8, k: k, color: color)
             case .audio:                                  // equalizer: 5 bars
                 strokeSeg(ctx, [(4, 10), (4, 14)], 1.8, k: k, color: color)
                 strokeSeg(ctx, [(8, 7), (8, 17)], 1.8, k: k, color: color)
@@ -51,9 +58,9 @@ struct TrackIcon: View {
     }
 }
 
-/// The Polish bottom-toolbar icons (Split / Trim / Speed / Volume / Delete).
+/// The Polish bottom-toolbar icons (Split / Trim / Speed / Volume / Record / Delete).
 struct ToolIcon: View {
-    enum Kind { case split, trim, speed, text, volume, delete, cleanVoice }
+    enum Kind { case split, trim, speed, text, volume, delete, cleanVoice, record }
     let kind: Kind
     var color: Color
     var side: CGFloat = 22
@@ -97,6 +104,10 @@ struct ToolIcon: View {
                 strokeSeg(ctx, [(9, 18.5), (15, 18.5)], 1.7, k: k, color: color)
                 strokeSeg(ctx, [(19, 3), (19, 6)], 1.3, k: k, color: color)      // sparkle
                 strokeSeg(ctx, [(17.5, 4.5), (20.5, 4.5)], 1.3, k: k, color: color)
+            case .record:                                 // record: ring + filled center dot
+                strokeCircle(ctx, 12, 12, 8, 1.7, k: k, color: color)
+                ctx.fill(Path(ellipseIn: CGRect(x: 8.5 * k, y: 8.5 * k, width: 7 * k, height: 7 * k)),
+                         with: .color(color))
             }
         }
         .frame(width: side, height: side)

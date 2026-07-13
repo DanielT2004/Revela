@@ -203,3 +203,43 @@ struct ToastView: View {
             .shadow(color: Color.veCharcoal.opacity(0.3), radius: 12, y: 8)
     }
 }
+
+/// The creator's avatar: their initial over a chosen `FoodTone` gradient (nil tone = the classic warm
+/// amber), or a person glyph before they've shared a name. Shared by Home, Profile, and onboarding —
+/// one implementation so the identity mark is identical everywhere.
+struct VelaAvatar: View {
+    var name: String?
+    var tone: Int?
+    var size: CGFloat = 42
+
+    private var initial: String? {
+        guard let first = name?.trimmingCharacters(in: .whitespacesAndNewlines).first else { return nil }
+        return String(first).uppercased()
+    }
+
+    private var gradient: LinearGradient {
+        tone.map { FoodTone.tone(for: $0).gradient }
+            // The pre-personalization amber (deliberately NOT .cheese — its ramp differs).
+            ?? LinearGradient(colors: [Color(hex: 0xE8B65E), Color(hex: 0xC07A3C)],
+                              startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+
+    var body: some View {
+        ZStack {
+            Circle().fill(gradient)
+            if let initial {
+                Text(initial)
+                    .font(VeFont.sans(size * 0.36, weight: .bold))
+                    .foregroundStyle(.white)
+                    .id(initial)   // new letter → fresh view → the transition springs it in
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+            } else {
+                Image(systemName: "person.fill")
+                    .font(.system(size: size * 0.4, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+            }
+        }
+        .frame(width: size, height: size)
+        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: initial)
+    }
+}

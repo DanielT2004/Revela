@@ -1,0 +1,23 @@
+{
+  "models": [
+    "gemini-pro-latest"
+  ],
+  "runs": 5,
+  "videos": [
+    {
+      "id": "howlins-vo-off",
+      "dir": "fixtures/howlins-vo-off",
+      "indexPath": "runs/howlins/perceive__gemini-2.5-flash__run1/index.json",
+      "durationSeconds": 237.9
+    },
+    {
+      "id": "howlins-vo-on",
+      "dir": "fixtures/howlins-vo-on",
+      "indexPath": "runs/howlins/perceive__gemini-2.5-flash__run1/index.json",
+      "durationSeconds": 237.9
+    }
+  ],
+  "judge": {
+    "enabled": false
+  }
+}

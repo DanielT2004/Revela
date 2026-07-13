@@ -13,6 +13,7 @@ final class AppRoute {
 
     enum Pending: Equatable {
         case analysis   // open into the freshly-finished analysis (reveal → breakdown)
+        case template   // open into the freshly-learned style template (create-flow review)
     }
 
     /// Set by `NotificationService` on a notification tap; cleared by `RootView` after it routes.

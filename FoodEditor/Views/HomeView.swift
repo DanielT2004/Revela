@@ -1,10 +1,6 @@
 import SwiftUI
 import UIKit
 
-/// Coordinate space for Home's project list — swipe-to-delete drags are measured against this
-/// non-moving ancestor (never `.local`), so the dragged tile tracks the finger without jitter.
-private let homeListSpace = "homeListSpace"
-
 /// Screen 1 — Home ("Kitchen"). Date header, avatar → Style Profile, terracotta "New video" CTA, and
 /// a real **In progress** list of saved projects (CP1.3). Tap a tile to resume editing where you left
 /// off; the tiles carry status + progress and re-load every time Home appears.
@@ -15,19 +11,23 @@ struct HomeView: View {
     @Environment(AuthStore.self) private var auth
     @Environment(TemplateService.self) private var templates
     @Environment(AnalysisCoordinator.self) private var analysis
+    @Environment(CreateFlow.self) private var create
 
     @State private var projectList: [Project] = []
     @State private var resumingId: UUID?
-    @State private var openRowId: UUID?           // the one tile currently swiped open
     @State private var pendingDelete: Project?    // drives the "are you sure?" confirmation
     @State private var showDeletedToast = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            ScrollView {
+            // Native List so swipe-to-delete on the project rows coexists correctly with vertical scrolling
+            // (a raw DragGesture inside a ScrollView captured the scroll and froze the list). The top chrome
+            // rides as a single borderless row so its layout is unchanged; only the project rows are swipeable.
+            List {
                 VStack(alignment: .leading, spacing: 0) {
                     header
                     processingCard   // shows only while a server-side analysis is in flight (e.g. after reopening)
+                    styleLearnCard   // shows a create-flow style learn that's running / ready / failed off-screen
                     if let active = templates.active {
                         activeStyleCard(active).padding(.top, 22)
                         yourTemplatesCard(active).padding(.top, 12)
@@ -37,39 +37,41 @@ struct HomeView: View {
                         emptyState.padding(.top, 40)
                     } else {
                         inProgressHeader.padding(.top, 30).padding(.bottom, 14)
-                        VStack(spacing: 12) {
-                            ForEach(projectList) { project in
-                                ProjectRow(
-                                    project: project,
-                                    resumingId: resumingId,
-                                    isOpen: openRowId == project.id,
-                                    onResume: { resume(project) },
-                                    onOpen: {
-                                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                                            openRowId = project.id
-                                        }
-                                    },
-                                    onClose: {
-                                        guard openRowId == project.id else { return }
-                                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                                            openRowId = nil
-                                        }
-                                    },
-                                    onRequestDelete: { pendingDelete = project }
-                                )
-                            }
-                        }
                     }
-
-                    #if DEBUG
-                    EvalDebugCard().padding(.top, 24)
-                    #endif
                 }
                 .padding(.horizontal, 22)
                 .padding(.top, 60)
-                .padding(.bottom, 40)
-                .coordinateSpace(name: homeListSpace)
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+
+                ForEach(projectList) { project in
+                    ProjectRow(project: project, resumingId: resumingId, onResume: { resume(project) })
+                        .listRowInsets(EdgeInsets(top: 6, leading: 22, bottom: 6, trailing: 22))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) { pendingDelete = project } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                            .tint(Color.veTerracotta)
+                        }
+                }
+
+                // Bottom spacer (and the DEBUG eval card) as a final borderless row.
+                Group {
+                    #if DEBUG
+                    EvalDebugCard().padding(.top, 24)
+                    #endif
+                    Color.clear.frame(height: 40)
+                }
+                .padding(.horizontal, 22)
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
             .background(Color.veCream.ignoresSafeArea())
             .confirmationDialog(
                 "Delete this project?",
@@ -125,8 +127,11 @@ struct HomeView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Processing your video")
                             .font(VeFont.sans(15, weight: .bold)).foregroundStyle(Color.veCharcoal).lineLimit(1)
-                        Text(analysis.canCloseApp ? "You can close the app — we’ll notify you when it’s ready."
-                                                  : analysis.label)
+                        Text(analysis.canCloseApp
+                             ? (NotificationService.shared.notificationsEnabled
+                                ? "You can close the app — we’ll notify you when it’s ready."
+                                : "You can close the app — check back in a minute.")
+                             : analysis.label)
                             .font(VeFont.sans(12)).foregroundStyle(Color.veWarmGray).lineLimit(1)
                     }
                     Spacer(minLength: 0)
@@ -142,6 +147,83 @@ struct HomeView: View {
             .buttonStyle(.plain)
             .padding(.top, 18)
         }
+    }
+
+    // MARK: in-flight style-learn card
+
+    /// A create-flow style learn that finishes (or fails) while the creator isn't on the Analyzing screen has
+    /// no other surface on Home — without this card a kill-resumed or off-screen learn would be stranded. Reads
+    /// the live create-flow coordinator; the reveal-on-Home path sets `create.draft` synchronously on the
+    /// `.done` transition, so `draft == nil` keeps this and the auto-reveal from ever double-firing.
+    @ViewBuilder private var styleLearnCard: some View {
+        switch create.coordinator.phase {
+        case .running:
+            styleCard(icon: "wand.and.stars", tint: Color.veTerracotta,
+                      title: "Learning your style…",
+                      subtitle: create.coordinator.label,
+                      progress: max(0.04, create.coordinator.progress)) {
+                router.go(.createAnalyzing)
+            }
+        case .done where create.coordinator.template != nil && create.draft == nil:
+            styleCard(icon: "sparkles", tint: Color.veTerracotta,
+                      title: "Your style is ready ✨",
+                      subtitle: "Tap to review and save it.",
+                      progress: nil) {
+                create.draft = create.coordinator.template
+                router.go(.createReview)
+            }
+        case .failed:
+            styleCard(icon: "exclamationmark.triangle", tint: Color.veTerracotta,
+                      title: "Style learn hit a snag",
+                      subtitle: "Tap to see what happened.",
+                      progress: nil) {
+                router.go(.createAnalyzing)
+            }
+        default:
+            EmptyView()
+        }
+    }
+
+    /// Shared visual for the style-learn card — mirrors `processingCard` (white rounded card, terracotta
+    /// stroke, progress ring or an SF icon, chevron).
+    private func styleCard(icon: String, tint: Color, title: String, subtitle: String,
+                           progress: Double?, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                ZStack {
+                    if let progress {
+                        Circle().stroke(tint.opacity(0.18), lineWidth: 4)
+                        Circle()
+                            .trim(from: 0, to: progress)
+                            .stroke(tint, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                            .animation(.easeOut(duration: 0.3), value: progress)
+                        Text("\(Int(progress * 100))%")
+                            .font(VeFont.mono(10, weight: .bold)).foregroundStyle(tint)
+                    } else {
+                        Circle().fill(tint.opacity(0.12))
+                        Image(systemName: icon).font(.system(size: 18)).foregroundStyle(tint)
+                    }
+                }
+                .frame(width: 46, height: 46)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(VeFont.sans(15, weight: .bold)).foregroundStyle(Color.veCharcoal).lineLimit(1)
+                    Text(subtitle)
+                        .font(VeFont.sans(12)).foregroundStyle(Color.veWarmGray).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.veFaintGray)
+            }
+            .padding(17)
+            .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(tint.opacity(0.25), lineWidth: 1.5))
+            .shadow(color: tint.opacity(0.12), radius: 12, y: 4)
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 12)
     }
 
     // MARK: active style + templates cards
@@ -214,23 +296,19 @@ struct HomeView: View {
             }
             Spacer()
             Button { router.go(.profile) } label: {
-                Text(auth.firstName.prefix(1).uppercased())
-                    .font(VeFont.sans(15, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 42, height: 42)
-                    .background(
-                        LinearGradient(colors: [Color(hex: 0xE8B65E), Color(hex: 0xC07A3C)],
-                                       startPoint: .topLeading, endPoint: .bottomTrailing),
-                        in: Circle()
-                    )
+                VelaAvatar(name: auth.user?.displayName, tone: auth.user?.avatarTone, size: 42)
                     .shadow(color: Color.veCharcoal.opacity(0.14), radius: 8, y: 2)
             }
             .buttonStyle(.plain)
-            // DEBUG: long-press the avatar to reset onboarding for repeat testing (no-op in release).
+            // DEBUG: long-press the avatar to reset onboarding for repeat testing. The whole modifier is
+            // compiled out of Release — the helper only no-ops the GESTURE there, but this closure body
+            // still had to compile, and `resetForTesting` itself is #if DEBUG (broke Archive builds).
+            #if DEBUG
             .debugResetOnLongPress {
                 auth.resetForTesting()
                 router.go(.onboarding)
             }
+            #endif
         }
     }
 
@@ -289,8 +367,7 @@ struct HomeView: View {
         UINotificationFeedbackGenerator().notificationOccurred(.warning)  // destructive haptic
         projects.delete(project.id)                                       // removes the folder on disk
         withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
-            projectList.removeAll { $0.id == project.id }                 // animated reflow
-            if openRowId == project.id { openRowId = nil }                // reset swipe state
+            projectList.removeAll { $0.id == project.id }                 // animated reflow (List animates the row out)
         }
         pendingDelete = nil
         withAnimation { showDeletedToast = true }
@@ -344,63 +421,26 @@ extension View {
     }
 }
 
-/// One project tile on Home. Tap resumes; swiping left (from the right edge) slides the white card
-/// over a terracotta **Delete** affordance. Tapping Delete asks the parent to confirm. Each row owns
-/// its own transient `dragX` so SwiftUI only re-renders the tile being dragged (CLAUDE.md: real `View`
-/// structs in hot lists, never `AnyView`).
+/// One project tile on Home. Tap resumes; swipe left (native `.swipeActions` on the parent List) reveals
+/// Delete, which routes through the parent's confirmation. Holds its poster in `@State`, loaded off-main.
 private struct ProjectRow: View {
     @Environment(ProjectService.self) private var projects
 
     let project: Project
     let resumingId: UUID?
-    let isOpen: Bool
     let onResume: () -> Void
-    let onOpen: () -> Void
-    let onClose: () -> Void
-    let onRequestDelete: () -> Void
 
-    @State private var dragX: CGFloat = 0   // live finger delta from the resting offset; 0 at rest
-
-    private static let revealWidth: CGFloat = 88
-    private static let openThreshold: CGFloat = 44
-
-    /// Resting offset is derived from the committed open state — no need to store it.
-    private var restingX: CGFloat { isOpen ? -Self.revealWidth : 0 }
+    @State private var poster: UIImage?     // loaded off-main via .task; nil shows the gradient placeholder
 
     var body: some View {
-        ZStack(alignment: .trailing) {
-            deleteBackground
-            cardBody
-                .offset(x: dragX + restingX)
-                .simultaneousGesture(dragGesture)
-        }
-        .transition(.opacity.combined(with: .move(edge: .trailing)))
+        cardBody
     }
 
-    // MARK: delete affordance (revealed behind the card)
-
-    private var deleteBackground: some View {
-        HStack {
-            Spacer(minLength: 0)
-            Button { onRequestDelete() } label: {
-                VStack(spacing: 4) {
-                    Image(systemName: "trash.fill").font(.system(size: 18, weight: .semibold))
-                    Text("Delete").font(VeFont.sans(11, weight: .bold))
-                }
-                .foregroundStyle(Color.veOnTerracotta)
-                .frame(width: Self.revealWidth)
-                .frame(maxHeight: .infinity)
-            }
-            .buttonStyle(.plain)
-        }
-        .background(Color.veTerracotta, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    // MARK: card (the original tile body, draggable)
+    // MARK: card (the tile body)
 
     private var cardBody: some View {
         HStack(spacing: 14) {
-            poster
+            posterTile
             VStack(alignment: .leading, spacing: 5) {
                 statusBadge(project.status)
                 Text(project.name)
@@ -423,50 +463,15 @@ private struct ProjectRow: View {
         .shadow(color: Color.veCharcoal.opacity(0.06), radius: 8, y: 3)
         .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .opacity(resumingId == nil || resumingId == project.id ? 1 : 0.5)
-        // A genuine tap opens/closes the row; a horizontal swipe moves the finger past TapGesture's slop,
-        // so the tap fails and only `dragGesture` fires. Using a real Button here caused the swipe-to-delete
-        // to ALSO fire its action mid-drag — flashing the delete background and jumping into Polish.
-        .onTapGesture { if resumingId == nil { tapAction() } }
+        .onTapGesture { if resumingId == nil { onResume() } }
         .accessibilityAddTraits(.isButton)
-    }
-
-    /// Tapping an open row closes it; tapping a closed row resumes (the original behaviour).
-    private func tapAction() {
-        if isOpen { onClose() } else { onResume() }
-    }
-
-    // MARK: swipe gesture (mirrors SwipeToDismiss, horizontal axis, stable named space)
-
-    private var dragGesture: some Gesture {
-        DragGesture(minimumDistance: 12, coordinateSpace: .named(homeListSpace))
-            .onChanged { v in
-                guard resumingId == nil,
-                      abs(v.translation.width) > abs(v.translation.height) else { return }  // horizontal only
-                let clamped = min(0, max(-Self.revealWidth, restingX + v.translation.width)) // clamp [-revealWidth, 0]
-                dragX = clamped - restingX
-            }
-            .onEnded { v in
-                guard resumingId == nil else { dragX = 0; return }
-                guard abs(v.translation.width) > abs(v.translation.height) else {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { dragX = 0 }
-                    return
-                }
-                let finalX = restingX + v.translation.width
-                let flickLeft = v.predictedEndTranslation.width < -120
-                let shouldOpen = finalX < -Self.openThreshold || flickLeft
-                if shouldOpen && !isOpen { UIImpactFeedbackGenerator(style: .soft).impactOccurred() }
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                    dragX = 0
-                    shouldOpen ? onOpen() : onClose()
-                }
-            }
     }
 
     // MARK: tile pieces (moved verbatim from HomeView)
 
-    private var poster: some View {
+    private var posterTile: some View {
         ZStack {
-            if let img = projects.poster(for: project.id) {
+            if let img = poster {
                 Image(uiImage: img).resizable().scaledToFill()
             } else {
                 FoodTile(tone: tone(for: project.status), cornerRadius: 10)
@@ -478,6 +483,11 @@ private struct ProjectRow: View {
         }
         .frame(width: 60, height: 78)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        // Instant on a warm cache; otherwise reads + decodes off the main thread so the list scrolls freely.
+        .task(id: project.id) {
+            if let cached = projects.cachedPoster(for: project.id) { poster = cached }
+            else { poster = await projects.loadPoster(for: project.id) }
+        }
     }
 
     private func statusBadge(_ status: ProjectStatus) -> some View {
@@ -550,4 +560,5 @@ private struct ProjectRow: View {
         .environment(ProjectService())
         .environment(AuthStore())
         .environment(TemplateService())
+        .environment(CreateFlow())
 }

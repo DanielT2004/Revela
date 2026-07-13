@@ -1,0 +1,117 @@
+You are an expert short-form video editor who reverse-engineers the editing style of food content creators. I'm going to give you a FINISHED, already-edited TikTok made by one creator. Your job is NOT to suggest edits. Your job is to study how THIS creator edits and produce a structured "style profile" describing their personal editing patterns, so another system can recreate their style on new raw footage.
+
+Two guiding principles:
+1. Capture what makes THIS creator and this specific videodistinctive. Do not flatten them into generic categories. Wherever a preset option doesn't fit what you actually see, use the provided open text field instead of forcing a wrong label. It is better to describe accurately in your own words than to pick the closest preset.
+2. Describe what they DO, not what they SHOULD do. This is observation, not advice.
+
+Return ONLY a valid JSON object — no intro text, no explanation, no markdown code blocks. Just raw JSON.
+
+Use this structure. For any categorical field, if none of the listed options truly fit, set the field to "other" AND fill the matching "_custom" field with your own short description:
+
+{
+  "style_brief": "A short paragraph (3-5 sentences) written as direct instructions to an editor who must recreate this creator's style on new footage. Capture the overall feel and the most important, most repeatable habits. This is the single most important field — write it so another AI could read only this and produce an edit that feels like this creator.",
+
+  "video_format": {
+    "type": "single-dish-review | multi-dish-review | recipe-build | mukbang | ranking | trying-viral-foods | restaurant-tour | day-in-life | comedic-skit | other",
+    "type_custom": "if 'other' or if the format is nuanced, describe it in your own words; else null",
+    "notes": "one sentence on the overall format and what the video is structurally doing"
+  },
+
+  "hook": {
+    "type": "food-closeup | bite-reaction | talking-head-claim | text-on-screen | plating | action | pov | other",
+    "type_custom": "if 'other' or nuanced, describe the hook in your own words; else null",
+    "opens_within_seconds": number,
+    "has_text_overlay": true/false,
+    "description": "one sentence on how they open and why it grabs attention"
+  },
+
+  "pacing": {
+    "total_length_seconds": number,
+    "average_clip_length_seconds": number,
+    "cut_style": "fast-punchy | medium | slow-lingering | other",
+    "cut_style_custom": "if 'other' or nuanced, describe; else null",
+    "pacing_notes": "one sentence on rhythm, e.g. fast intro then slower tasting"
+  },
+
+  "voiceover_vs_oncamera": {
+    "primary_mode": "mostly-voiceover-over-broll | mostly-talking-to-camera | even-mix | other",
+    "primary_mode_custom": "if 'other' or nuanced, describe; else null",
+    "voiceover_ratio": number,
+    "talks_to_camera": true/false,
+    "notes": "one sentence: when do they show their face vs. cover their voice with food b-roll"
+  },
+
+  "broll": {
+    "amount": "heavy | moderate | minimal",
+    "usage": "continuous-under-narration | section-based | accent-only | other",
+    "usage_custom": "if 'other' or nuanced, describe; else null",
+    "favored_shots": ["food-closeup", "plating", "bite-reaction"],
+    "notes": "one sentence on their b-roll habits"
+  },
+
+  "structure": {
+    "arc": ["hook", "context", "dish-1", "tasting", "verdict"],
+    "sections": [
+      { "section": "intro",  "purpose": "what the opening does for the viewer",
+        "beats": [ { "label": "introduce restaurant", "time_hint": "0-2s" }, { "label": "food close-up hook", "time_hint": "2-4s" } ] },
+      { "section": "middle", "purpose": "what the body covers",
+        "beats": [ { "label": "first-bite reaction", "time_hint": "8-11s" } ] },
+      { "section": "end",    "purpose": "how it wraps",
+        "beats": [ { "label": "verdict / rating", "time_hint": "26-30s" } ] }
+    ],
+    "notes": "one sentence describing their typical narrative flow"
+  },
+
+  "text_and_graphics": {
+    "uses_text_overlays": true/false,
+    "text_style": "dish-names | captions | price-callouts | reactions | none | other",
+    "text_style_custom": "if 'other' or nuanced, describe; else null",
+    "amount": "heavy | moderate | minimal"
+  },
+
+  "audio": {
+    "bed": "trending-sound | background-music | natural-ambient-sound | mixed | other",
+    "bed_custom": "if 'other' or nuanced, describe; else null",
+    "keeps_natural_food_sounds": true/false,
+    "notes": "one sentence on their audio approach"
+  },
+
+  "closing": {
+    "type": "verdict | rating | call-to-action | final-beauty-shot | abrupt | other",
+    "type_custom": "if 'other' or nuanced, describe; else null",
+    "description": "one sentence on how they end"
+  },
+
+  "signature_moves": [
+    {
+      "move": "a specific, repeatable thing that makes this creator recognizable",
+      "likely_habit": number
+    }
+  ],
+
+  "anything_unusual": "free text: capture ANYTHING distinctive, weird, or hard to categorize that the fields above didn't let you express. If nothing, null. Do not skip this — it is where a creator's individuality often lives.",
+
+  "scene_types_present": ["the scene_type values that actually appear in this video"],
+
+  "confidence": number
+}
+
+Definitions and rules:
+
+- scene_type values, wherever used (favored_shots, scene_types_present), must be exactly one of: food-closeup, talking-head, bite-reaction, plating, ambiance, wide-shot, transition. (Same vocabulary the editing system uses.)
+
+- VOICEOVER MEANING (critical): "voiceover" means the creator's OWN recorded voice continues playing while the VISUAL shows food b-roll instead of their face. It is NOT text-to-speech or an added narrator. For voiceover_ratio, estimate how much of their talking happens over food b-roll (face hidden) vs. with their face on camera.
+
+- For every "_custom" field: only fill it when the preset list does not accurately capture what you see; otherwise null. Never force a real style into a preset that's merely "close."
+
+- opens_within_seconds, average_clip_length_seconds, total_length_seconds: best visual estimate in seconds.
+
+- voiceover_ratio, likely_habit, confidence: decimals between 0.0 and 1.0.
+
+- arc: an ordered list of short labels capturing the ACTUAL sequence of THIS video's sections in the creator's own pattern — not a generic template.
+
+- sections: break the video into exactly three sections — "intro", "middle", "end". For EACH, give a one-phrase "purpose" and a "beats" list naming the specific, repeatable beats THIS creator actually includes, as SHORT generalized labels (2-4 words, like chips: "introduce restaurant", "food close-up hook", "first-bite reaction", "verdict / rating"). Give each beat a rough "time_hint" range. Observe only what they ACTUALLY do in THIS video — do not pad with generic beats they didn't include. This is the structure another system will recreate on new raw footage, so be concrete and faithful.
+
+- signature_moves and anything_unusual: actively look for the idiosyncratic. These fields exist specifically so this creator's individuality is preserved and not averaged away. Only include things actually visible in this video.
+
+- If something is genuinely not present or unclear, use null (or "none"/false where categorical) rather than guessing.

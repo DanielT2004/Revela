@@ -1,15 +1,22 @@
 import SwiftUI
+import UIKit
 
-/// Onboarding step 1 — "Create your profile".
+/// Onboarding step 1 — "what should Vela call you?".
 ///
-/// ⚠️ Auth is intentionally stubbed for now: both buttons are placeholders that just fast-forward into the
-/// app (no real Apple/phone sign-in). Real **Sign in with Apple** needs a paid Apple Developer account
-/// (the capability is hidden on a free/personal team), and phone needs an SMS backend — both deferred so we
-/// don't burn time on login. `AuthStore.signInWithApple(_:)` is kept for when we wire it up later.
+/// ⚠️ Real login is still deferred: **Sign in with Apple** needs the paid-account capability and phone
+/// needs an SMS backend, and a visibly fake auth button is worse than none. So this step asks for a
+/// first name instead — it signs the Kitchen greeting, the avatar, and the profile page.
+/// `AuthStore.signInWithApple(_:)` is kept for when real auth lands. Skippable — never block
+/// onboarding on a text field.
 struct SignUpStepView: View {
     @Environment(AuthStore.self) private var auth
-    /// Called once the user taps a sign-in button (advances onboarding).
+    /// Called once the user continues (advances onboarding).
     let onComplete: () -> Void
+
+    @State private var name = ""
+    @FocusState private var nameFocused: Bool
+
+    private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -18,10 +25,11 @@ struct SignUpStepView: View {
                 .ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 0) {
-                Text("First, let's\nkeep your style\nsomewhere safe.")
+                Text("Before we start —\nwhat should\nVela call you?")
                     .font(VeFont.serif(30, italic: true))
                     .foregroundStyle(Color.veOnTerracotta)
                     .lineSpacing(3)
+                    .minimumScaleFactor(0.85)
                     .padding(.horizontal, 34)
                     .padding(.top, 40)
 
@@ -29,6 +37,12 @@ struct SignUpStepView: View {
 
                 sheet
             }
+        }
+        // Focus the field only after the step's 0.3s entrance fade has settled (keyboard mid-transition
+        // makes the sheet jump).
+        .task {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            nameFocused = true
         }
     }
 
@@ -38,44 +52,48 @@ struct SignUpStepView: View {
                 .padding(.top, 14).padding(.bottom, 22)
 
             VStack(alignment: .leading, spacing: 0) {
-                Text("Create your profile")
+                Text("Introduce yourself")
                     .font(VeFont.serif(24)).foregroundStyle(Color.veCharcoal)
-                Text("Drafts, saved cuts and your templates, on every device.")
+                Text("A first name is plenty — it signs your kitchen, your cuts and your templates.")
                     .font(VeFont.sans(14)).foregroundStyle(Color.veNoteText).lineSpacing(2)
                     .padding(.top, 7)
 
-                // Placeholder — styled like the mockup's Apple button, but just fast-forwards for now.
-                Button(action: fastForward) {
-                    Text("Continue with Apple")
-                        .font(VeFont.sans(16, weight: .semibold))
-                        .foregroundStyle(.white)
+                // Live preview: the avatar springs the initial in as they type (same mark as Home).
+                HStack(spacing: 14) {
+                    VelaAvatar(name: name, tone: nil, size: 56)
+                    TextField("Your name", text: $name)
+                        .font(VeFont.serif(31)).foregroundStyle(Color.veCharcoal)
+                        .textContentType(.givenName)
+                        .textInputAutocapitalization(.words)
+                        .autocorrectionDisabled()
+                        .submitLabel(.done)
+                        .focused($nameFocused)
+                        .onSubmit(continueTapped)
+                }
+                .padding(.top, 22)
+
+                PrimaryActionButton(title: "That's me", enabled: !trimmed.isEmpty, action: continueTapped)
+                    .padding(.top, 20)
+
+                Button {
+                    auth.signIn(displayName: nil)
+                    onComplete()
+                } label: {
+                    Text("Skip for now")
+                        .font(VeFont.sans(13.5, weight: .semibold))
+                        .foregroundStyle(Color.veWarmGray)
                         .frame(maxWidth: .infinity)
-                        .frame(height: 56)
-                        .background(Color(hex: 0x16130F), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .padding(.vertical, 4)
                 }
                 .buttonStyle(.plain)
-                .padding(.top, 20)
+                .padding(.top, 12)
 
-                // Placeholder — fast-forwards for now.
-                Button(action: fastForward) {
-                    Text("Continue with phone number")
-                        .font(VeFont.sans(16, weight: .semibold))
-                        .foregroundStyle(Color.veCharcoal)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 56)
-                        .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(Color(hex: 0xE2DACB), lineWidth: 1.5))
-                }
-                .buttonStyle(.plain)
-                .padding(.top, 11)
-
-                Text("We never post anything without you.")
+                Text("Saved on your phone — change it anytime in your profile.")
                     .font(VeFont.sans(11.5))
                     .foregroundStyle(Color.veFaintGray)
                     .frame(maxWidth: .infinity)
                     .multilineTextAlignment(.center)
-                    .padding(.top, 16)
+                    .padding(.top, 14)
             }
             .padding(.horizontal, 30)
         }
@@ -89,9 +107,11 @@ struct SignUpStepView: View {
         )
     }
 
-    /// Stubbed sign-in: record a local guest user so the rest of the app has an identity, then advance.
-    private func fastForward() {
-        auth.signInAsGuest()
+    /// Commit the typed name: light haptic (confirmation), record it, advance.
+    private func continueTapped() {
+        guard !trimmed.isEmpty else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        auth.signIn(displayName: trimmed)
         onComplete()
     }
 }

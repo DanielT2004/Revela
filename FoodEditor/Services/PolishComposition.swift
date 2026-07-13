@@ -16,22 +16,23 @@ enum PolishComposition {
         let baseCleaned: AVMutableCompositionTrack?    // cleaned-where-covered base voice; nil if no cleaned file
         let basePieces: [AudioPiece]
         let overlayParams: [AVMutableAudioMixInputParameters]
+        // The voiceover mix state baked into this build, so the in-place Original↔Cleaned swap
+        // re-applies the same duck envelope + track-mute to the base tracks.
+        let duck: [ClosedRange<Double>]
+        let duckLevel: Float
+        let originalMuted: Bool
     }
 
-    /// Build the audio mix for a given toggle state: the active base track plays at the per-clip volumes,
-    /// the other base track is muted; overlay params are reused unchanged. Assign this to
-    /// `item.audioMix` (then a same-position seek to apply it live — see PolishView).
+    /// Build the audio mix for a given toggle state: the active base track plays at the per-clip
+    /// volumes crossed with the voiceover duck envelope (and the track-mute flag), the other base track
+    /// is muted; overlay params are reused unchanged. Assign this to `item.audioMix` (then a
+    /// same-position seek to apply it live — see PolishView).
     static func voiceAudioMix(_ d: VoicePreview, useIsolated: Bool) -> AVMutableAudioMix {
-        let sorted = d.basePieces.sorted { $0.baseStart < $1.baseStart }
         func params(_ track: AVMutableCompositionTrack, active: Bool) -> AVMutableAudioMixInputParameters {
             let p = AVMutableAudioMixInputParameters(track: track)
             p.audioTimePitchAlgorithm = .spectral
-            var prev: Float = -1
-            for piece in sorted {
-                let vol: Float = active ? piece.volume : 0
-                if vol != prev { p.setVolume(vol, at: CMTime(seconds: piece.baseStart, preferredTimescale: 600)); prev = vol }
-            }
-            if !active { p.setVolume(0, at: .zero) }   // ensure muted from t=0
+            AudioDucking.apply(to: p, pieces: d.basePieces, duck: d.duck, level: d.duckLevel,
+                               active: active && !d.originalMuted)
             return p
         }
         let origActive = !useIsolated || d.baseCleaned == nil
@@ -47,8 +48,13 @@ enum PolishComposition {
                          baseAudio: [AudioPiece],
                          overlayAudio: [AudioPiece],
                          isolated: [IsolatedAudioSpan] = [],
-                         useIsolated: Bool = false) async -> VoicePreview? {
+                         useIsolated: Bool = false,
+                         narration: [NarrationPiece] = [],
+                         duckLevel: Float = 0.2,
+                         originalMuted: Bool = false) async -> VoicePreview? {
         guard !slots.isEmpty else { return nil }
+        // Where the original bed dips under the voiceover — shared envelope, same as the exporter.
+        let duck = AudioDucking.duckIntervals(for: narration)
         let asset = AVURLAsset(url: proxyURL)
         guard let srcVideo = try? await asset.loadTracks(withMediaType: .video).first else { return nil }
         let srcAudio = try? await asset.loadTracks(withMediaType: .audio).first
@@ -164,17 +170,68 @@ enum PolishComposition {
         if let overlayTrack = await buildAudioTrack(overlayAudio, useCleaned: false) {
             let p = AVMutableAudioMixInputParameters(track: overlayTrack)
             p.audioTimePitchAlgorithm = .spectral
-            var prev: Float = -1
-            for piece in overlayAudio.sorted(by: { $0.baseStart < $1.baseStart }) where piece.volume != prev {
-                p.setVolume(piece.volume, at: CMTime(seconds: piece.baseStart, preferredTimescale: 600))
-                prev = piece.volume
-            }
+            // Audible B-roll is part of the original bed: same duck envelope + track-mute as the base.
+            AudioDucking.apply(to: p, pieces: overlayAudio, duck: duck, level: duckLevel,
+                               active: !originalMuted)
             overlayParams.append(p)
+        }
+
+        // ── NARRATION (recorded voiceover takes) ──
+        // Takes are timeline-time audio files — insert `[fileIn, fileOut]` at `startOnBase` directly, no
+        // proxy mapping, no speed scaling. Mirrors `EditPlanAssembler.buildNarrationTrack` (lockstep).
+        // The mix params ride in `overlayParams` so the in-place Original↔Cleaned swap (`voiceAudioMix`
+        // re-appends them unchanged) keeps narration audible without a rebuild. The AVURLAssets are
+        // retained in a build-scoped cache for the same orphaned-track-inserts-SILENT reason as above.
+        if !narration.isEmpty,
+           let nTrack = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            var takeCache: [URL: (asset: AVURLAsset, track: AVAssetTrack, duration: Double)] = [:]
+            var trackEnd = CMTime.zero
+            var inserted = 0
+            for piece in narration.sorted(by: { $0.startOnBase < $1.startOnBase }) {
+                var entry = takeCache[piece.url]
+                if entry == nil {
+                    let a = AVURLAsset(url: piece.url)
+                    if let t = try? await a.loadTracks(withMediaType: .audio).first {
+                        let d = (try? await a.load(.duration).seconds) ?? .greatestFiniteMagnitude
+                        entry = (asset: a, track: t, duration: d); takeCache[piece.url] = entry
+                    }
+                }
+                guard let take = entry else {
+                    Log.audio("⚠️ preview: narration take unreadable: \(piece.url.lastPathComponent) — skipped.")
+                    continue
+                }
+                let at = CMTime(seconds: piece.startOnBase, preferredTimescale: 600)
+                if CMTimeCompare(at, trackEnd) > 0 {
+                    nTrack.insertEmptyTimeRange(CMTimeRange(start: trackEnd, end: at))
+                }
+                let lo = max(0, piece.fileIn)
+                let hi = min(piece.fileOut, take.duration)
+                guard hi > lo + 0.02 else { continue }
+                let r = CMTimeRange(start: CMTime(seconds: lo, preferredTimescale: 600),
+                                    end: CMTime(seconds: hi, preferredTimescale: 600))
+                do {
+                    try nTrack.insertTimeRange(r, of: take.track, at: at)
+                    inserted += 1
+                } catch {
+                    Log.audio("⚠️ preview: narration insert failed @\(String(format: "%.1f", at.seconds))s: \(error.localizedDescription)")
+                }
+                trackEnd = CMTime(seconds: piece.startOnBase + (hi - lo), preferredTimescale: 600)
+            }
+            if inserted > 0 {
+                let p = AVMutableAudioMixInputParameters(track: nTrack)
+                p.audioTimePitchAlgorithm = .spectral
+                for piece in narration.sorted(by: { $0.startOnBase < $1.startOnBase }) {
+                    p.setVolume(piece.volume, at: CMTime(seconds: piece.startOnBase, preferredTimescale: 600))
+                }
+                overlayParams.append(p)
+            }
+            Log.audio("🎧 preview: \(inserted)/\(narration.count) narration take(s) inserted, track dur=\(String(format: "%.1f", CMTimeGetSeconds(nTrack.timeRange.duration)))s.")
         }
 
         let item = AVPlayerItem(asset: comp)
         let descriptor = VoicePreview(item: item, baseOriginal: baseOriginal, baseCleaned: baseCleaned,
-                                      basePieces: baseAudio, overlayParams: overlayParams)
+                                      basePieces: baseAudio, overlayParams: overlayParams,
+                                      duck: duck, duckLevel: duckLevel, originalMuted: originalMuted)
         item.audioMix = voiceAudioMix(descriptor, useIsolated: useIsolated)
         item.audioTimePitchAlgorithm = .spectral
         return descriptor

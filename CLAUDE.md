@@ -137,6 +137,19 @@ This is what makes Vela feel good. When adding a feature, reach for these:
     deliberate downward drags dismiss. Never ship a full-screen player that can only be closed by a tap.
 
 **Gestures — avoid the conflicts (learned the hard way)**
+- **PREFER SwiftUI-native swipe + scroll over a custom `DragGesture`.** Native `List` / `ScrollView`
+  interactions are far less bug-prone than hand-rolled gesture arbitration — reach for them first, always.
+  Row **swipe-to-delete → a real `List` with `.swipeActions(edge: .trailing)`**, never a custom
+  `DragGesture` on rows inside a `ScrollView`. Why: a raw `DragGesture` (even via `.simultaneousGesture`)
+  *wins the touch over the scroll pan* whenever the finger starts on a row, so vertical scrolling silently
+  freezes on the list while the header/cards above still scroll — this froze BOTH the Home project list and
+  the Templates list, and no amount of gesture-gating fixed it (arming on scroll is circular). The List
+  fix: `List { … }.listStyle(.plain).scrollContentBackground(.hidden)`, header/cards as one borderless row
+  (`.listRowInsets(EdgeInsets()) + .listRowSeparator(.hidden) + .listRowBackground(.clear)`), data rows with
+  the same row modifiers plus `.swipeActions`. See [Views/PickerView.swift](FoodEditor/Views/PickerView.swift),
+  [Views/HomeView.swift](FoodEditor/Views/HomeView.swift), [Views/TemplateLibraryView.swift](FoodEditor/Views/TemplateLibraryView.swift).
+  The custom-`DragGesture` swipe patterns below are for surfaces a `List` genuinely can't express (the Polish
+  timeline); don't reintroduce them for ordinary list rows.
 - A plain `DragGesture` on scroll content **blocks the ScrollView**. To reorder *and* scroll on the same
   surface: use **`LongPressGesture(0.28).sequenced(before: DragGesture())`** attached with
   **`.simultaneousGesture`** (not `.gesture`), and `.scrollDisabled(isActivelyDragging)` so the scroll

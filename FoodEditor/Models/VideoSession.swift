@@ -51,6 +51,9 @@ final class VideoSession {
     /// `merged.sourceSpans` still point at on-disk temp originals). See `ExportSourceResolver`.
     var originSources: [PersistedSpan]?
 
+    /// One-shot: the Polish page's "record a voiceover?" nudge already showed for this session.
+    var narrationNudgeShown = false
+
     var count: Int { clips.count }
     var isEmpty: Bool { clips.isEmpty }
 
@@ -131,5 +134,6 @@ final class VideoSession {
         furthestStage = .sort
         editorStage = .sort
         pendingReveal = false
+        narrationNudgeShown = false
     }
 }

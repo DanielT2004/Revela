@@ -24,7 +24,7 @@ struct BriefView: View {
                     footageSection.padding(.top, 22)
                     lengthSection.padding(.top, 24)
                     section("How it opens") { hookSection }
-                    section("Me on camera vs. b-roll") { leanGrid }
+                    section("Me on camera vs. b-roll") { leanSection }
                     section("Make sure to keep") { keepBeatsChips }
                     section("Trim the slow stuff") { trimToggle }
                     section("Anything specific?") { noteField }
@@ -216,6 +216,17 @@ struct BriefView: View {
 
     // MARK: how it opens — ordered multi-select (back-to-back)
 
+    /// The active template's confirmed spoken hook line, if any — so the max-scroll-stop toggle is honest
+    /// about the one thing it may displace (mirrors `BriefPromptBuilder.confirmedHookLine`).
+    private var confirmedHookQuote: String? {
+        guard let t = templates.active else { return nil }
+        return t.profile.verbalStyle.recurringLines.first { l in
+            l.isSpoken && l.role == "hook"
+                && (l.confirmation == "every" || (t.count >= 2 && l.evidenceCount >= t.count))
+                && !l.quote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }?.quote
+    }
+
     private var hookSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             // Opt-in: let the AI open on the single most arresting moment (more scroll-stopping; overrides the chips).
@@ -237,7 +248,8 @@ struct BriefView: View {
             .disabled(brief.maxScrollStopHook)
 
             Text(brief.maxScrollStopHook
-                 ? "The AI opens on the most scroll-stopping moment, then teases the payoff."
+                 ? (confirmedHookQuote.map { "May open on something punchier than your usual “\($0)” — your line still makes the cut, just after the opener." }
+                    ?? "The AI opens on the most scroll-stopping moment, then teases the payoff.")
                  : (brief.hookSequence.isEmpty
                     ? "Leave empty to let the AI pick the strongest opener."
                     : "Plays back-to-back in this order."))
@@ -247,9 +259,33 @@ struct BriefView: View {
 
     // MARK: me on camera vs. b-roll
 
+    private var leanSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            leanGrid
+            voiceoverPlanToggle
+        }
+    }
+
     private var leanGrid: some View {
         grid(BrollLean.allCases.map(\.label), columns: 3,
              selected: index(of: brief.brollLean, in: BrollLean.allCases)) { brief.brollLean = BrollLean.allCases[$0] }
+    }
+
+    /// Narration recorded IN Vela after the cut (Polish → Voiceover tool) — pre-set from the template's
+    /// learned voiceover habits; steers the cut toward visual flow and pre-arms the Polish nudge.
+    private var voiceoverPlanToggle: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("I'll record a voiceover")
+                    .font(VeFont.sans(14, weight: .semibold)).foregroundStyle(Color.veCharcoal)
+                Text("You'll narrate over the finished edit in Vela — the cut will favor strong visuals.")
+                    .font(VeFont.sans(12)).foregroundStyle(Color.veWarmGray)
+            }
+            Spacer(minLength: 8)
+            Toggle("", isOn: $brief.plansVoiceover).labelsHidden().tint(Color.veTerracotta)
+        }
+        .padding(14)
+        .background(Color.white, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
     }
 
     // MARK: make sure to keep
@@ -328,6 +364,7 @@ struct BriefView: View {
         case .balanced:  break
         case .brollHeavy:parts.append("leaning on b-roll")
         }
+        if brief.plansVoiceover { parts.append("recording a voiceover") }
         if !brief.keepBeats.isEmpty {
             let beats = KeepBeat.allCases.filter { brief.keepBeats.contains($0) }.map { $0.label.lowercased() }
             parts.append("keeping \(beats.joined(separator: " + "))")
@@ -393,7 +430,7 @@ struct BriefView: View {
     private func submit() {
         session.brief = brief
         UINotificationFeedbackGenerator().notificationOccurred(.success)
-        Log.app("📝 Brief — ~\(brief.lengthSeconds)s · open \(brief.hookSequence.map(\.label)) · lean \(brief.brollLean.label) · keep \(brief.keepBeats.map(\.label)) · trim \(brief.trimSlowParts).")
+        Log.app("📝 Brief — ~\(brief.lengthSeconds)s · open \(brief.hookSequence.map(\.label)) · lean \(brief.brollLean.label) · voiceover \(brief.plansVoiceover) · keep \(brief.keepBeats.map(\.label)) · trim \(brief.trimSlowParts).")
         router.go(.processing)
     }
 

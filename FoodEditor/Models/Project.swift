@@ -39,8 +39,9 @@ struct Project: Identifiable, Codable, Equatable {
     var schemaVersion: Int
 
     /// Current persisted-state schema. v1 = segment-id model; v2 = clip-instance model (split-capable);
-    /// v3 = adds text overlays + per-clip crop (decoded leniently, so v2 files still open).
-    static let currentSchema = 3
+    /// v3 = adds text overlays + per-clip crop; v4 = narration lane + master original-audio gain
+    /// (all decoded leniently, so older files still open).
+    static let currentSchema = 4
 }
 
 // MARK: - Persisted source map
@@ -70,20 +71,41 @@ struct EditState: Codable, Equatable {
     var dismissed: Set<Int>
     /// v3: burned-in text captions. Defaults to `[]` so v2 saves (which lack the key) still decode.
     var textOverlays: [TextOverlay] = []
+    /// v4: recorded voiceover takes + the voiceover mix state (duck level, track mute, first-take
+    /// toast flag; `originalAudioGain`/`lastNonZeroGain` are vestigial v1-duck fields kept so early v4
+    /// saves decode). Take FILES live in the project folder's `narration/` dir; only file names here.
+    var narrationLane: [NarrationClip] = []
+    var originalAudioGain: Float = 1
+    var lastNonZeroGain: Float = 1
+    var didAutoDuck: Bool = false
+    var voDuckLevel: Float = 0.2
+    var originalAudioMuted: Bool = false
+    /// v5: the export "did this feel like you?" verdict (nil = not answered). Durable so the future
+    /// style-learning loop has signal; defaults nil so pre-v5 saves decode unchanged.
+    var exportFeedback: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case order, brollClips, cutTray, hookId, brollLane, brollSource, dismissed, textOverlays
+        case narrationLane, originalAudioGain, lastNonZeroGain, didAutoDuck, voDuckLevel, originalAudioMuted
+        case exportFeedback
     }
 
     init(order: [Clip], brollClips: [Int], cutTray: [Int], hookId: Int?, brollLane: [OverlayClip],
-         brollSource: [Int: Int], dismissed: Set<Int>, textOverlays: [TextOverlay] = []) {
+         brollSource: [Int: Int], dismissed: Set<Int>, textOverlays: [TextOverlay] = [],
+         narrationLane: [NarrationClip] = [], originalAudioGain: Float = 1,
+         lastNonZeroGain: Float = 1, didAutoDuck: Bool = false,
+         voDuckLevel: Float = 0.2, originalAudioMuted: Bool = false, exportFeedback: Bool? = nil) {
         self.order = order; self.brollClips = brollClips; self.cutTray = cutTray; self.hookId = hookId
         self.brollLane = brollLane; self.brollSource = brollSource; self.dismissed = dismissed
         self.textOverlays = textOverlays
+        self.narrationLane = narrationLane; self.originalAudioGain = originalAudioGain
+        self.lastNonZeroGain = lastNonZeroGain; self.didAutoDuck = didAutoDuck
+        self.voDuckLevel = voDuckLevel; self.originalAudioMuted = originalAudioMuted
+        self.exportFeedback = exportFeedback
     }
 
-    /// Lenient decode: any field added after a save (currently `textOverlays`) defaults rather than
-    /// throwing, so older project.json files open unchanged.
+    /// Lenient decode: any field added after a save (`textOverlays`, the v4 narration fields) defaults
+    /// rather than throwing, so older project.json files open unchanged.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         order        = try c.decode([Clip].self, forKey: .order)
@@ -94,6 +116,13 @@ struct EditState: Codable, Equatable {
         brollSource  = try c.decode([Int: Int].self, forKey: .brollSource)
         dismissed    = try c.decode(Set<Int>.self, forKey: .dismissed)
         textOverlays = try c.decodeIfPresent([TextOverlay].self, forKey: .textOverlays) ?? []
+        narrationLane      = try c.decodeIfPresent([NarrationClip].self, forKey: .narrationLane) ?? []
+        originalAudioGain  = try c.decodeIfPresent(Float.self, forKey: .originalAudioGain) ?? 1
+        lastNonZeroGain    = try c.decodeIfPresent(Float.self, forKey: .lastNonZeroGain) ?? 1
+        didAutoDuck        = try c.decodeIfPresent(Bool.self, forKey: .didAutoDuck) ?? false
+        voDuckLevel        = try c.decodeIfPresent(Float.self, forKey: .voDuckLevel) ?? 0.2
+        originalAudioMuted = try c.decodeIfPresent(Bool.self, forKey: .originalAudioMuted) ?? false
+        exportFeedback     = try c.decodeIfPresent(Bool.self, forKey: .exportFeedback)
     }
 }
 

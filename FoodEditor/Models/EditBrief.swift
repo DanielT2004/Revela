@@ -27,6 +27,10 @@ struct EditBrief: Equatable {
     var hookSequence: [HookShot] = []    // ordered openers → top of final_edit_order + hook_score
     var maxScrollStopHook: Bool = true   // ON by default: AI opens on the most arresting moment (overrides hookSequence); creators toggle OFF for a fixed opener
     var brollLean: BrollLean = .balanced // → voiceover_candidate leaning + broll_placements coverage
+    /// Creator will record a narration voiceover IN Vela after the cut (Polish → Voiceover tool) —
+    /// distinct from the in-footage voiceover_candidate lean above. Steers DECIDE toward a cut that
+    /// reads well under narration, and pre-arms the Polish page's voiceover nudge.
+    var plansVoiceover: Bool = false
     var keepBeats: Set<KeepBeat> = []    // → keep:true + sensible placement
     var trimSlowParts: Bool = true       // → trim_to_seconds on weak heads/tails + keep:false on filler
     var note: String = ""                // free-text catch-all (content-specific asks, specific hook idea)
@@ -85,6 +89,11 @@ struct EditBrief: Equatable {
 
         if let opener = HookShot(profileType: p.hook.type) { b.hookSequence = [opener] }
         b.brollLean = BrollLean(voiceoverRatio: p.voiceover.voiceoverRatio)
+        // Narration-led creators (their posted videos are mostly voice over b-roll) almost certainly
+        // narrate in post — default the voiceover plan ON from the fields the style learning already
+        // captures. Vocabulary matches the extraction prompt's primary_mode enum.
+        b.plansVoiceover = p.voiceover.primaryMode == "mostly-voiceover-over-broll"
+            || p.voiceover.voiceoverRatio >= 0.6
         return b
     }
 }

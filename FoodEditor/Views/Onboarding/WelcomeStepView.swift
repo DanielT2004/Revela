@@ -20,7 +20,7 @@ struct WelcomeStepView: View {
                 Spacer(minLength: 24)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Show me three\nof your videos —")
+                    Text("Show me one\nof your videos —")
                         .font(VeFont.serif(40, italic: true))
                     Text("I'll show you\nyour style.")
                         .font(VeFont.serif(40))

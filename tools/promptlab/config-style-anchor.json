@@ -1,0 +1,6 @@
+{
+  "_readme": "Anchor control: the HISTORICAL condition (no style block at all) scored by TODAY'S judge — separates 'the changes hurt quality' from 'the yardstick got harsher'.",
+  "videos": [ { "id": "howlins-nostyle", "dir": "fixtures/howlins-nostyle", "indexPath": "fixtures/howlins-nostyle/index.json", "durationSeconds": 237.9 } ],
+  "models": ["gemini-pro-latest"],
+  "runs": 2
+}

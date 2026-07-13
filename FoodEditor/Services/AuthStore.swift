@@ -13,6 +13,11 @@ struct VelaUser: Codable, Equatable {
     var displayName: String?
     var phone: String?
     var method: AuthMethod
+    /// First sign-in date — drives the Profile's "Cooking with Vela since {Month Year}" line.
+    /// Optional with a default so pre-existing persisted JSON (and call sites) keep working.
+    var joinedAt: Date? = nil
+    /// `FoodTone` index personalizing the avatar gradient (nil = the classic warm amber).
+    var avatarTone: Int? = nil
 }
 
 /// Owns the creator's identity + the first-run flag. Injected into the environment (like `ProjectService`).
@@ -66,6 +71,11 @@ final class AuthStore {
         guard let data = try? Data(contentsOf: userURL),
               let decoded = try? decoder.decode(VelaUser.self, from: data) else { return }
         user = decoded
+        // One-time self-heal for users who signed in before `joinedAt` existed.
+        if user?.joinedAt == nil {
+            user?.joinedAt = Date()
+            persist()
+        }
         Log.app("🍳 Restored signed-in user (\(decoded.method.rawValue)).")
     }
 
@@ -83,16 +93,41 @@ final class AuthStore {
         let name = [credential.fullName?.givenName, credential.fullName?.familyName]
             .compactMap { $0 }.joined(separator: " ")
         let keptName = name.isEmpty ? user?.displayName : name
-        user = VelaUser(appleUserId: credential.user, displayName: keptName, phone: user?.phone, method: .apple)
+        user = VelaUser(appleUserId: credential.user, displayName: keptName, phone: user?.phone, method: .apple,
+                        joinedAt: user?.joinedAt ?? Date(), avatarTone: user?.avatarTone)
         persist()
         Log.app("🍳 Signed in with Apple (…\(String(credential.user.suffix(4)))), name: \(keptName ?? "—").")
     }
 
-    /// Placeholder sign-in: marks the user present without any real auth (used while login is stubbed).
-    func signInAsGuest() {
-        user = VelaUser(appleUserId: nil, displayName: user?.displayName, phone: nil, method: .guest)
+    /// Local sign-in (auth still stubbed): records the chosen display name (nil = skipped the field) and
+    /// stamps `joinedAt` exactly once, so "since {Month Year}" survives repeat onboarding runs.
+    func signIn(displayName: String?) {
+        let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        user = VelaUser(appleUserId: user?.appleUserId,
+                        displayName: (trimmed?.isEmpty == false) ? trimmed : user?.displayName,
+                        phone: user?.phone, method: .guest,
+                        joinedAt: user?.joinedAt ?? Date(), avatarTone: user?.avatarTone)
         persist()
-        Log.app("🍳 Signed in as guest (auth stubbed). // TODO: wire real Apple/phone auth later.")
+        Log.app("🍳 Signed in, name: \(user?.displayName ?? "—"). // TODO: wire real Apple/phone auth later.")
+    }
+
+    /// Placeholder sign-in: marks the user present without any real auth (used while login is stubbed).
+    func signInAsGuest() { signIn(displayName: nil) }
+
+    /// Rename from the Profile page. Empty/whitespace input is ignored (the field reverts instead).
+    func updateDisplayName(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard user != nil, !trimmed.isEmpty else { return }
+        user?.displayName = trimmed
+        persist()
+        Log.app("🍳 Display name updated → \(trimmed).")
+    }
+
+    /// Persist the avatar's `FoodTone` index chosen on the Profile page.
+    func setAvatarTone(_ tone: Int) {
+        guard user != nil else { return }
+        user?.avatarTone = tone
+        persist()
     }
 
     /// Local stub — no real SMS. Records an optional display name and marks the user present.
@@ -120,7 +155,10 @@ final class AuthStore {
 
     /// Encode→decode round-trip sanity check (mirrors FileProjectStore.runSelfTest).
     static func runSelfTest() {
-        let sample = VelaUser(appleUserId: "001234.abcd", displayName: "Mara Vance", phone: nil, method: .apple)
+        // Whole-second date on purpose: the .iso8601 strategy drops fractional seconds, so a Date() here
+        // would round-trip unequal and false-fail the test.
+        let sample = VelaUser(appleUserId: "001234.abcd", displayName: "Mara Vance", phone: nil, method: .apple,
+                              joinedAt: Date(timeIntervalSince1970: 1_750_000_000), avatarTone: 3)
         let e = JSONEncoder(); e.dateEncodingStrategy = .iso8601
         let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601
         guard let data = try? e.encode(sample), let back = try? d.decode(VelaUser.self, from: data), back == sample else {

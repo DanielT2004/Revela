@@ -1,0 +1,13 @@
+{
+  "_readme": "schemaOn arm: does constrained decoding stabilize recurring-line recall? v2 only, schema on, same 3 videos.",
+  "fixtures": [
+    { "id": "miyamiya", "path": "fixtures/style/duo-example/miyamiya.MP4", "truth": "fixtures/style/duo-example/truth-miyamiya.json" },
+    { "id": "queenofsheba", "path": "fixtures/style/duo-example/queenOfSheba.MP4", "truth": "fixtures/style/duo-example/truth-queenofsheba.json" },
+    { "id": "thaifood", "path": "fixtures/style/duo-example/thaiFood.MP4", "truth": "fixtures/style/duo-example/truth-thaifood.json" }
+  ],
+  "prompts": ["style-v2.txt"],
+  "models": ["gemini-flash-latest"],
+  "schemaOn": [true],
+  "schemaFile": "style-schema.json",
+  "runs": 2
+}

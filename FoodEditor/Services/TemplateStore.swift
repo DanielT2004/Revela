@@ -65,7 +65,7 @@ final class FileTemplateStore: TemplateStore {
                   let id = UUID(uuidString: dir.lastPathComponent),
                   let data = try? Data(contentsOf: docURL(id)),
                   let t = try? decoder.decode(StyleTemplate.self, from: data),
-                  t.schemaVersion <= 2
+                  t.schemaVersion <= StyleTemplate.currentSchemaVersion
             else { return nil }
             return t
         }

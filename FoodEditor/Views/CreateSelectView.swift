@@ -37,19 +37,21 @@ struct CreateSelectView: View {
         let on = create.selectedIDs.contains(clip.id)
         return Button { create.toggle(clip.id) } label: {
             ZStack(alignment: .topTrailing) {
-                Group {
-                    if let thumb = clip.thumbnail {
-                        Image(uiImage: thumb).resizable().scaledToFill()
-                    } else {
-                        ZStack { FoodTile(tone: FoodTone.tone(for: clip.id.hashValue), cornerRadius: 11); ProgressView().tint(.white) }
+                // Container-owned geometry (cell width → 9:13 height); the thumb renders in an overlay so
+                // its intrinsic size can't inflate the tile — same fix as TemplateEditorView.videoGrid.
+                Color.clear
+                    .aspectRatio(9.0/13.0, contentMode: .fit)
+                    .overlay {
+                        if let thumb = clip.thumbnail {
+                            Image(uiImage: thumb).resizable().scaledToFill()
+                        } else {
+                            ZStack { FoodTile(tone: FoodTone.tone(for: clip.id.hashValue), cornerRadius: 11); ProgressView().tint(.white) }
+                        }
                     }
-                }
-                .aspectRatio(9.0/13.0, contentMode: .fill)
-                .frame(maxWidth: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-                .overlay(LinearGradient(colors: [.clear, .black.opacity(0.28)], startPoint: .center, endPoint: .bottom))
-                .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .strokeBorder(Color.veTerracotta, lineWidth: on ? 2.5 : 0))
+                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .overlay(LinearGradient(colors: [.clear, .black.opacity(0.28)], startPoint: .center, endPoint: .bottom))
+                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(Color.veTerracotta, lineWidth: on ? 2.5 : 0))
 
                 checkmark(on)
             }

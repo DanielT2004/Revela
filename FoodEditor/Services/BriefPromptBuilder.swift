@@ -11,7 +11,10 @@ import Foundation
 /// were honored — so feedback works even with no active style template.
 enum BriefPromptBuilder {
 
-    static func block(for brief: EditBrief?) -> String {
+    /// `template` = the active style template, used ONLY to keep the default max-scroll-stop opener from
+    /// silently discarding a signature hook line the creator confirmed minutes earlier (displaced, never
+    /// dropped). The brief still outranks the style everywhere — this just makes the collision explicit.
+    static func block(for brief: EditBrief?, template: StyleTemplate? = nil) -> String {
         guard let b = brief else { return "" }
 
         var lines: [String] = []
@@ -21,7 +24,16 @@ enum BriefPromptBuilder {
 
         // 2 — opener: MAX SCROLL-STOP (let the AI pick the punchiest moment) OR a fixed ordered sequence
         if b.maxScrollStopHook {
-            lines.append("- Cold open — MAX SCROLL-STOP (no fixed shot sequence): open on the SINGLE most arresting moment in the footage — the punchiest claim, the biggest first-taste/peak reaction, or the most striking food shot with a strong line over it — whatever stops the scroll in the first ~1.5s. Do NOT force a fixed opener order; pick the best opener the footage offers, put it at the very top of final_edit_order and boost its hook_score, follow it with a one-line stakes/verdict TEASE, then continue with the intro and the rest in intro → middle → end order. Keep it coherent — the opener + tease must still lead sensibly into the video.")
+            var scrollStop = "- Cold open — MAX SCROLL-STOP (no fixed shot sequence): open on the SINGLE most arresting moment in the footage — the punchiest claim, the biggest first-taste/peak reaction, or the most striking food shot with a strong line over it — whatever stops the scroll in the first ~1.5s. Do NOT force a fixed opener order; pick the best opener the footage offers, put it at the very top of final_edit_order and boost its hook_score, follow it with a one-line stakes/verdict TEASE, then continue with the intro and the rest in intro → middle → end order. Keep it coherent — the opener + tease must still lead sensibly into the video."
+            // A style-side teaser-montage opener is not a CONFLICT with max-scroll-stop — it's how this
+            // creator stops the scroll. Say so explicitly, or the brief's priority silently wins.
+            if let t = template, t.profile.hook.montage.isMontage, t.profile.hook.montage.source != "other-creators" {
+                scrollStop += " This creator's style opens with a rapid TEASER-MONTAGE (see their style block): honor it — the single most arresting moment should LEAD the teaser as its first shot, not replace the teaser."
+            }
+            if let hookLine = Self.confirmedHookLine(in: template) {
+                scrollStop += " That said: this creator's confirmed signature hook line is \"\(hookLine)\" — if it exists in the footage, prefer it as the opener when it's competitive; if you open on something stronger, place the signature line immediately after the cold open — displaced, never dropped — and say why in style_match_notes."
+            }
+            lines.append(scrollStop)
         } else if !b.hookSequence.isEmpty {
             let ordered = b.hookSequence.enumerated()
                 .map { "\($0.offset + 1)) \($0.element.phrasing) [\($0.element.sceneType)]" }
@@ -31,6 +43,11 @@ enum BriefPromptBuilder {
 
         // 3 — voiceover/b-roll lean → voiceover_candidate + broll_placements
         lines.append("- Voiceover vs. on camera: \(b.brollLean.phrasing) The four strict voiceover_candidate conditions in the body below remain hard requirements regardless.")
+
+        // 3b — creator will narrate in post (Vela's in-app voiceover recorder) → cut for visual flow
+        if b.plansVoiceover {
+            lines.append("- The creator will record a fresh narration voiceover over the finished edit inside the app (this is separate from — and does not change — the strict in-footage voiceover_candidate rules below). Cut for a video that reads well under narration: favor visually strong segments, and beautiful food/action/payoff shots are worth keeping even where their live audio is weak or silent; do not fight to preserve spoken filler. Genuinely strong spoken moments (real reactions, punchy claims, the verdict) still deserve keep:true — the narration will be mixed around them.")
+        }
 
         // 4 — keep-these-beats → keep:true + placement
         if !b.keepBeats.isEmpty {
@@ -63,5 +80,18 @@ enum BriefPromptBuilder {
 
 
         """
+    }
+
+    /// The creator's confirmed SPOKEN hook line, if the active template has one — user-confirmed
+    /// ("every") or heard in every source video (N≥2). Suppressed keys never qualify (they're already
+    /// removed from the template's lines when rejected).
+    private static func confirmedHookLine(in template: StyleTemplate?) -> String? {
+        guard let t = template else { return nil }
+        let line = t.profile.verbalStyle.recurringLines.first { l in
+            l.isSpoken && l.role == "hook"
+                && (l.confirmation == "every" || (t.count >= 2 && l.evidenceCount >= t.count))
+                && !l.quote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return line?.quote.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

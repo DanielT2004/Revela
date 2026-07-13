@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// Onboarding step 2 — "Connect". Camera-roll import only for now (TikTok/IG deferred — see the seam below).
-/// Tapping the card opens the system picker; clips land in the shared `VideoSession`. The CTA enables once
-/// at least one clip is chosen, then advances to Analyzing (step 3).
+/// Takes 1–3 finished videos: one works, but the copy actively sells adding more — cross-video repetition
+/// is what upgrades a guessed habit into a confirmed signature (evidence badges + the Reveal's "in all
+/// three videos…" story). The CTA enables once at least one clip is chosen, then advances to Analyzing.
 struct ConnectStepView: View {
     @Environment(VideoSession.self) private var session
 
@@ -10,6 +11,8 @@ struct ConnectStepView: View {
     let onContinue: () -> Void
 
     @State private var showPicker = false
+    @State private var downloadProgress: Progress?     // non-nil while a picked video copies out of the library
+    @State private var showLoadFailToast = false
 
     private var hasClips: Bool { !session.isEmpty }
 
@@ -23,7 +26,7 @@ struct ConnectStepView: View {
                 .lineSpacing(2)
                 .padding(.top, 24)
 
-            Text("Vela studies how you actually cut — your hooks, your pacing, your voice. Nothing is posted or changed.")
+            Text("Pick 1–3 videos you've already edited and posted. Vela studies how you actually cut — your hooks, your pacing, your catchphrases. Nothing is posted or changed.")
                 .font(VeFont.sans(14.5))
                 .foregroundStyle(Color.veNoteText)
                 .lineSpacing(3)
@@ -34,17 +37,38 @@ struct ConnectStepView: View {
                 title: "Import from camera roll",
                 subtitle: hasClips
                     ? "\(session.count) video\(session.count == 1 ? "" : "s") selected · tap to change"
-                    : "Pick the videos to learn from",
+                    : "Pick 1–3 edited videos to learn from",
                 selected: hasClips
             ) { showPicker = true }
             .padding(.top, 22)
+
+            // Sell the extra videos without blocking anyone: one is enough to start, three lets the
+            // learn CONFIRM what they always do instead of guessing from a single sample.
+            if hasClips && session.count < 3 {
+                Text(session.count == 1
+                     ? "One works — but with 3 videos we can tell your every-video signatures from one-off moments. Tap to add \(3 - session.count) more."
+                     : "Nice — one more and we can confirm what you do in every video. Tap to add it.")
+                    .font(VeFont.sans(12.5))
+                    .foregroundStyle(Color(hex: 0x9A7350))
+                    .lineSpacing(2)
+                    .padding(.top, 10)
+            } else if !hasClips {
+                Text("More videos, sharper template — 3 lets us confirm your signatures instead of guessing from one.")
+                    .font(VeFont.sans(12.5))
+                    .foregroundStyle(Color.veWarmGray)
+                    .lineSpacing(2)
+                    .padding(.top, 10)
+            }
 
             // TODO: TikTok / Instagram import — deferred. Add more `SourceCard`s here when wired.
 
             Spacer(minLength: 24)
 
             if hasClips {
-                PrimaryActionButton(title: "Connect & import", action: onContinue)
+                PrimaryActionButton(title: session.count == 1
+                                    ? "Learn my style"
+                                    : "Learn my style from \(session.count) videos",
+                                    action: onContinue)
             } else {
                 // Disabled-looking CTA (greyed) until a source is chosen.
                 Text("Choose your videos")
@@ -61,12 +85,38 @@ struct ConnectStepView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.veCream.ignoresSafeArea())
         .fullScreenCover(isPresented: $showPicker) {
-            VideoPicker(preselectedIdentifiers: session.selectedAssetIdentifiers) { picked in
+            // Up to 3 finished videos; each re-pick REPLACES the prior selection (deliberate — the iOS 26
+            // preselection regression makes additive re-picking unreliable, and replace-all is the
+            // simplest mental model for a 3-item choice).
+            VideoPicker(preselectedIdentifiers: [], selectionLimit: 3,
+                        onLoadingBegan: { progress in
+                            showPicker = false           // dismiss the sheet; the overlay shows the copy
+                            downloadProgress = progress
+                        }) { picked, failedCount in
                 showPicker = false
+                downloadProgress = nil
+                guard !picked.isEmpty else {
+                    if failedCount > 0 { withAnimation { showLoadFailToast = true } }
+                    return
+                }
+                session.startFresh()
                 session.ingest(picked)
             }
             .ignoresSafeArea()
         }
+        .overlay { if let p = downloadProgress { MediaDownloadOverlay(progress: p) } }
+        .overlay(alignment: .bottom) {
+            if showLoadFailToast {
+                ToastView(text: "Couldn't load that video — check your connection and try again.")
+                    .padding(.bottom, 30)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .task {
+                        try? await Task.sleep(nanoseconds: 2_400_000_000)
+                        withAnimation { showLoadFailToast = false }
+                    }
+            }
+        }
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: showLoadFailToast)
     }
 }
 

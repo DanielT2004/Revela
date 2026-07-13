@@ -11,7 +11,7 @@ import Observation
 final class CreateFlow {
     let session = VideoSession()
     var selectedIDs: Set<UUID> = []
-    let coordinator = StyleAnalysisCoordinator()
+    let coordinator = StyleAnalysisCoordinator(origin: .newTemplate)
     var draft: StyleTemplate?
 
     var clips: [SourceClip] { session.clips }
@@ -31,5 +31,8 @@ final class CreateFlow {
         if selectedIDs.contains(id) { selectedIDs.remove(id) } else { selectedIDs.insert(id) }
     }
 
-    func reset() { session.startFresh(); selectedIDs = []; draft = nil }
+    func reset() {
+        session.startFresh(); selectedIDs = []; draft = nil
+        coordinator.reset()   // clear a finished/failed pipeline so a stale phase can't keep driving the Home card
+    }
 }

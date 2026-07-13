@@ -67,15 +67,25 @@ struct PickedClip {
 struct VideoPicker: UIViewControllerRepresentable {
     /// Asset identifiers already in the session — shown as preselected so they aren't re-added.
     let preselectedIdentifiers: [String]
-    /// Called with the newly-added clips (already deduped against the preselection), in pick order.
-    let onPicked: ([PickedClip]) -> Void
+    /// PHPicker selection cap: `0` = unlimited multi-select (the editing flows); `1` = single video (the
+    /// style-learning flows, which learn from one template video). Defaults to unlimited so existing call
+    /// sites are unchanged.
+    var selectionLimit: Int = 0
+    /// Fired on the main queue the moment file copies begin, with an aggregate `Progress` covering them all —
+    /// so a caller can dismiss the picker and show a determinate download overlay (iCloud-offloaded videos can
+    /// take minutes to copy out). Optional; nil at call sites that don't surface progress.
+    var onLoadingBegan: ((Progress) -> Void)? = nil
+    /// Called with the newly-added clips (already deduped against the preselection), in pick order, plus how
+    /// many eligible picks FAILED to load (e.g. an iCloud download that errored) so the caller can surface a
+    /// toast instead of silently dropping them.
+    let onPicked: ([PickedClip], _ failedCount: Int) -> Void
 
     func makeUIViewController(context: Context) -> PHPickerViewController {
         // A photo-library-backed config is required for asset identifiers, ordered selection, and
         // preselection — none of which prompt for library access (the picker stays out-of-process).
         var config = PHPickerConfiguration(photoLibrary: .shared())
         config.filter = .videos
-        config.selectionLimit = 0            // 0 = unlimited multi-select
+        config.selectionLimit = selectionLimit   // 0 = unlimited multi-select; 1 = single video
         config.selection = .ordered          // results follow tap order; shows order numbers
         config.preferredAssetRepresentationMode = .current
         config.preselectedAssetIdentifiers = preselectedIdentifiers
@@ -103,24 +113,34 @@ struct VideoPicker: UIViewControllerRepresentable {
             Log.video("Picker closed: \(results.count) selected, \(newResults.count) new to ingest.")
 
             guard !newResults.isEmpty else {
-                DispatchQueue.main.async { self.parent.onPicked([]) }
+                DispatchQueue.main.async { self.parent.onPicked([], 0) }
                 return
             }
 
             let movieType = UTType.movie.identifier
+            // Only movie-conforming picks actually load — count them so the aggregate progress and the
+            // failed-count are measured against what we really attempt (not silently-skipped non-movies).
+            let eligible = newResults.enumerated().filter {
+                $0.element.itemProvider.hasItemConformingToTypeIdentifier(movieType)
+            }
             let group = DispatchGroup()
             let lock = NSLock()
             var byIndex: [Int: PickedClip] = [:]   // preserve pick order
 
-            for (index, result) in newResults.enumerated() {
+            // One parent Progress covering every eligible copy — handed to the caller so it can show a
+            // determinate download overlay (iCloud-offloaded clips can take minutes). Fired on main BEFORE any
+            // completion can run so the began→picked ordering is guaranteed (main-queue FIFO).
+            let parentProgress = Progress(totalUnitCount: Int64(max(eligible.count, 1)))
+            if !eligible.isEmpty {
+                let cb = self.parent.onLoadingBegan
+                DispatchQueue.main.async { cb?(parentProgress) }
+            }
+
+            for (index, result) in eligible {
                 let provider = result.itemProvider
                 let assetID = result.assetIdentifier
-                guard provider.hasItemConformingToTypeIdentifier(movieType) else {
-                    Log.video("New item \(index) is not a movie — skipping.")
-                    continue
-                }
                 group.enter()
-                provider.loadFileRepresentation(forTypeIdentifier: movieType) { url, error in
+                let childProgress = provider.loadFileRepresentation(forTypeIdentifier: movieType) { url, error in
                     defer { group.leave() }
                     if let error {
                         Log.video("Item \(index) load error: \(error.localizedDescription)")
@@ -144,12 +164,15 @@ struct VideoPicker: UIViewControllerRepresentable {
                         Log.video("Item \(index) copy failed: \(error.localizedDescription)")
                     }
                 }
+                parentProgress.addChild(childProgress, withPendingUnitCount: 1)   // drives the download overlay
             }
 
+            let attempted = eligible.count
             group.notify(queue: .main) {
-                let ordered = (0..<newResults.count).compactMap { byIndex[$0] }
-                Log.video("Handing back \(ordered.count) new clip(s).")
-                self.parent.onPicked(ordered)
+                let ordered = eligible.map(\.offset).compactMap { byIndex[$0] }
+                let failed = attempted - ordered.count
+                Log.video("Handing back \(ordered.count) new clip(s)\(failed > 0 ? ", \(failed) failed to load" : "").")
+                self.parent.onPicked(ordered, failed)
             }
         }
     }

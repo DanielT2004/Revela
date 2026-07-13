@@ -12,6 +12,8 @@ struct PickerView: View {
     @State private var showPicker = false
     @State private var editMode: EditMode = .inactive
     @State private var previewClip: SourceClip?
+    @State private var downloadProgress: Progress?     // non-nil while picked videos copy out of the library
+    @State private var loadFailCount = 0               // >0 briefly drives the "couldn't load" toast
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -26,12 +28,27 @@ struct PickerView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.veCream.ignoresSafeArea())
         .fullScreenCover(isPresented: $showPicker) {
-            VideoPicker(preselectedIdentifiers: session.selectedAssetIdentifiers, onPicked: handlePicked)
+            VideoPicker(preselectedIdentifiers: session.selectedAssetIdentifiers,
+                        onLoadingBegan: { progress in showPicker = false; downloadProgress = progress },
+                        onPicked: handlePicked)
                 .ignoresSafeArea()
         }
         .sheet(item: $previewClip) { clip in
             ClipPreviewSheet(url: clip.url)
         }
+        .overlay { if let p = downloadProgress { MediaDownloadOverlay(progress: p) } }
+        .overlay(alignment: .bottom) {
+            if loadFailCount > 0 {
+                ToastView(text: "Couldn't load \(loadFailCount) video\(loadFailCount == 1 ? "" : "s") — check your connection and try again.")
+                    .padding(.bottom, 30)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .task {
+                        try? await Task.sleep(nanoseconds: 2_400_000_000)
+                        withAnimation { loadFailCount = 0 }
+                    }
+            }
+        }
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: loadFailCount)
     }
 
     // MARK: header
@@ -166,9 +183,11 @@ struct PickerView: View {
         Log.video("Removed clip \(idx + 1); \(session.count) remaining.")
     }
 
-    private func handlePicked(_ newClips: [PickedClip]) {
+    private func handlePicked(_ newClips: [PickedClip], _ failedCount: Int) {
         showPicker = false
+        downloadProgress = nil
         session.ingest(newClips)   // shared with onboarding Connect (VideoSession.ingest)
+        if failedCount > 0 { withAnimation { loadFailCount = failedCount } }
     }
 }
 

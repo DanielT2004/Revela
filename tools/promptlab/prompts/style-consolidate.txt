@@ -1,0 +1,29 @@
+You are consolidating N per-video style profiles of ONE food creator into a single style template.
+Each source profile was extracted from a different finished video by the same creator, using the JSON
+schema you see in the sources. Return ONLY one valid JSON object in that SAME schema — no prose, no
+markdown — with the additions described below.
+
+Rules:
+- Categorical fields: choose the DOMINANT pattern across the sources (what they usually do), not the
+  single most-confident video. Where sources genuinely disagree, prefer "other" plus a _custom
+  description of the range (e.g. "30s dish reviews, occasionally 60s multi-dish").
+- recurring_lines, signoff, rating_format: deduplicate by MEANING — "we'll see y'all next time" and
+  "see you in the next one" are the SAME sign-off; keep the clearest verbatim quote as "quote". If a
+  line has a varying slot across videos ("Day 12…", "Day 47…"), set "pattern" to the templated form
+  with a placeholder and keep one verbatim example as "quote".
+- EVIDENCE — for every recurring_line, every habit_candidate, and every section beat, add
+  "seen_in": an array of the source indices (0-based) that contain it. Count paraphrases of the same
+  line/habit/beat as the same item, but ONLY cite a source that really contains it — if a line is
+  absent from a source, that index must not appear. Do not invent consistency.
+- structure.sections: unify beats to FORMAT-LEVEL labels that apply to any future video (never this
+  video's dishes or places — those go in the beat's "example"); merge same-meaning beats; keep one
+  "example" per beat from any source.
+- habit_candidates: merge same-meaning habits, keep the most specific label/detail, 3-6 items ordered
+  most-distinctive-first, each with its "kind" and "seen_in". At least 2 must be kind selection or
+  verbal.
+- reveal_script: REWRITE it as a story of consistency across all N videos — second person, one
+  sentence per line, 4-6 lines, quoting the creator's own words at least once. Be numerically honest:
+  "in all three videos…", "two out of three times…". Never say "always" or "every video" unless the
+  item's seen_in covers every source.
+- Numbers (lengths, ratios, confidence): give your best estimate; a separate system recomputes exact
+  averages, so never agonize over arithmetic.

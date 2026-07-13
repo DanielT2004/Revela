@@ -10,6 +10,7 @@ import UIKit
 struct FirstCutView: View {
     @Environment(AppRouter.self) private var router
     @Environment(VideoSession.self) private var session
+    @Environment(TemplateService.self) private var templates
 
     @State private var thumbs: [Int: UIImage] = [:]
     @State private var preview: SlicePreview?
@@ -556,10 +557,31 @@ struct FirstCutView: View {
 
     // MARK: - Your style (conditional)
 
+    /// The AI's style accountability note, PLUS the cut-time bridges for habits Vela can't auto-apply:
+    /// supplied-footage habits (e.g. the borrowed-clip montage) point at the manual Polish path, and a
+    /// written text signature says it's pre-loaded in the text tool. Template-driven, zero prompt cost —
+    /// celebration in the Reveal must never end in silence at cut time.
     @ViewBuilder
     private func styleSection(store: EditPlanStore) -> some View {
-        if let notes = store.plan.styleMatchNotes, !notes.trimmingCharacters(in: .whitespaces).isEmpty {
-            section("Your style") { ReasonNote(text: notes) }
+        let notes = (store.plan.styleMatchNotes ?? "").trimmingCharacters(in: .whitespaces)
+        let suppliedHabits = templates.active?.habits.filter {
+            $0.kind == HabitKind.suppliedFootage && !$0.label.trimmingCharacters(in: .whitespaces).isEmpty
+        } ?? []
+        let textLine = templates.active?.profile.verbalStyle.recurringLines.first {
+            $0.medium == "text-overlay" && $0.confirmation != "out" && !$0.quote.isEmpty
+        }
+        if !notes.isEmpty || !suppliedHabits.isEmpty || textLine != nil {
+            section("Your style") {
+                VStack(alignment: .leading, spacing: 10) {
+                    if !notes.isEmpty { ReasonNote(text: notes) }
+                    ForEach(suppliedHabits) { habit in
+                        ReasonNote(text: "Your videos usually include “\(habit.label)” — Vela can't auto-build that yet. Add those clips yourself in the editor.")
+                    }
+                    if let line = textLine {
+                        ReasonNote(text: "Your on-screen text signature (“\((line.pattern?.isEmpty == false ? line.pattern! : line.quote))”) is pre-loaded in the editor's text tool.")
+                    }
+                }
+            }
         }
     }
 

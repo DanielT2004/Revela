@@ -13,4 +13,19 @@ enum AudioSession {
             Log.app("Audio session config failed: \(error.localizedDescription)")
         }
     }
+
+    /// Voiceover recording (`NarrationRecorder`): `.playAndRecord` so the muted preview keeps rolling
+    /// while the mic captures; `.defaultToSpeaker` because playAndRecord otherwise routes output to the
+    /// earpiece; `.allowBluetooth` so a connected headset mic can be used. Call `configureForPlayback()`
+    /// again when the take ends.
+    static func configureForRecording() {
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .default,
+                                                            options: [.defaultToSpeaker, .allowBluetooth])
+            try AVAudioSession.sharedInstance().setActive(true)
+            Log.app("Audio session → .playAndRecord (voiceover recording).")
+        } catch {
+            Log.app("Audio session record config failed: \(error.localizedDescription)")
+        }
+    }
 }

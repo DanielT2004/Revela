@@ -1,0 +1,24 @@
+{
+  "_readme": "Smoke run on the creator's 3 real finished TikToks — baseline vs v2, flash-latest, 2 runs each = 12 cells, executed by the parallel pool. Truth files are minimal (few known verbal signatures), so read the profiles qualitatively: verbal_style content, habit kinds, generalized beats, reveal_script tone.",
+  "fixtures": [
+    {
+      "id": "miyamiya",
+      "path": "fixtures/style/duo-example/miyamiya.MP4",
+      "truth": "fixtures/style/duo-example/truth-miyamiya.json"
+    },
+    {
+      "id": "queenofsheba",
+      "path": "fixtures/style/duo-example/queenOfSheba.MP4",
+      "truth": "fixtures/style/duo-example/truth-queenofsheba.json"
+    },
+    {
+      "id": "thaifood",
+      "path": "fixtures/style/duo-example/thaiFood.MP4",
+      "truth": "fixtures/style/duo-example/truth-thaifood.json"
+    }
+  ],
+  "prompts": ["style-baseline.txt", "style-v2.txt"],
+  "models": ["gemini-flash-latest"],
+  "schemaOn": [false],
+  "runs": 2
+}

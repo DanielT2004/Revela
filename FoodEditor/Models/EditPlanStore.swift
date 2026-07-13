@@ -93,6 +93,30 @@ final class EditPlanStore {
     /// span read the cleaned file instead of the source; uncovered pieces still play the original.
     var useIsolatedAudio: Bool = false
 
+    /// Layer "Voiceover": narration takes recorded over the assembled timeline (preview + export).
+    /// Timeline-anchored (spine edits don't ripple them) and overlap-free by construction.
+    var narrationLane: [NarrationClip] = []
+    /// Vestigial v1-duck fields, kept ONLY so older v4 saves decode (no live reads or writes).
+    var originalAudioGain: Float = 1
+    var lastNonZeroGain: Float = 1
+    /// "Under voiceover" duck level: how loud the original bed (base clips + audible B-roll) stays
+    /// while a take is playing. A mix-time envelope (`AudioDucking`) scoped to the takes — moving or
+    /// deleting a take re-scopes it automatically; clip volumes are never written.
+    var voDuckLevel: Float = 0.2
+    /// CapCut-style track mute for ALL original footage audio (the gutter speaker at the Main lane).
+    /// A non-destructive flag applied at mix time — per-clip volumes are untouched, so unmuting always
+    /// returns the exact previous mix, across undo and relaunch alike.
+    var originalAudioMuted: Bool = false
+    /// First-take toast already shown for this project (see `noteFirstTake`).
+    var didAutoDuck: Bool = false
+    /// Where this project's narration files live (`Projects/<id>/narration/`). NOT persisted — set by
+    /// `ProjectService` on resume / by the Polish page before the first take; `NarrationClip.fileName`s
+    /// resolve against it.
+    var narrationDirectory: URL?
+    /// Takes dropped on resume because their file vanished — the Polish page shows a one-shot toast
+    /// and resets this. Transient, never persisted.
+    var prunedNarrationOnResume: Int = 0
+
     init(plan: EditPlan, brollCoverageTarget: Double = 0.25, spineIsVerbatim: Bool = false) {
         self.plan = plan
         self.brollCoverageTarget = max(0, min(1, brollCoverageTarget))
@@ -164,6 +188,14 @@ final class EditPlanStore {
         Log.gemini("⚠️ Order check — \(buried.count) intro clip(s) \(buried) play AFTER the tasting/verdict began (AI buried the intro). Using the AI's order verbatim anyway — not re-sorting.")
     }
 
+    /// The export "did this feel like you?" verdict (nil = unanswered). Persisted via `snapshot()` so the
+    /// future style-learning loop keeps the signal across kill / re-open.
+    var exportFeedback: Bool?
+
+    /// True when the cut has NO b-roll to work with — both the source pool and the placed lane are empty
+    /// (e.g. a single talking-head clip). Drives the Polish empty-B-roll-lane hint.
+    var hasNoBrollAvailable: Bool { brollClips.isEmpty && brollLane.isEmpty }
+
     // MARK: - Persistence (save / resume)
     //
     // The on-disk `EditState` (schema v2) stores clip instances directly, so splits + per-instance in/out
@@ -181,13 +213,24 @@ final class EditPlanStore {
         brollSource  = state.brollSource
         dismissed    = state.dismissed
         textOverlays = state.textOverlays
+        narrationLane      = state.narrationLane
+        originalAudioGain  = state.originalAudioGain
+        lastNonZeroGain    = state.lastNonZeroGain
+        didAutoDuck        = state.didAutoDuck
+        voDuckLevel        = state.voDuckLevel
+        originalAudioMuted = state.originalAudioMuted
+        exportFeedback     = state.exportFeedback
+        normalizeOverlaySourceStarts()   // resolve legacy overlays (no stored in-point) to head-anchored
     }
 
     /// A Codable snapshot of all editable state — the "edit" half of a saved project.
     func snapshot() -> EditState {
         EditState(order: order, brollClips: brollClips, cutTray: cutTray, hookId: hookId,
                   brollLane: brollLane, brollSource: brollSource, dismissed: dismissed,
-                  textOverlays: textOverlays)
+                  textOverlays: textOverlays, narrationLane: narrationLane,
+                  originalAudioGain: originalAudioGain, lastNonZeroGain: lastNonZeroGain,
+                  didAutoDuck: didAutoDuck, voDuckLevel: voDuckLevel,
+                  originalAudioMuted: originalAudioMuted, exportFeedback: exportFeedback)
     }
 
     // MARK: - Undo / redo
@@ -221,6 +264,10 @@ final class EditPlanStore {
         order = s.order; brollClips = s.brollClips; cutTray = s.cutTray; hookId = s.hookId
         brollLane = s.brollLane; brollSource = s.brollSource; dismissed = s.dismissed
         textOverlays = s.textOverlays
+        narrationLane = s.narrationLane; originalAudioGain = s.originalAudioGain
+        lastNonZeroGain = s.lastNonZeroGain; didAutoDuck = s.didAutoDuck
+        voDuckLevel = s.voDuckLevel; originalAudioMuted = s.originalAudioMuted
+        normalizeOverlaySourceStarts()   // legacy snapshots without a stored in-point → head-anchored
     }
 
     // MARK: - Lookups
@@ -319,6 +366,7 @@ final class EditPlanStore {
         let anchors = captureLaneAnchors()
         mutate()
         reapplyLaneAnchors(anchors)
+        clampNarrationIntoBounds()   // takes are timeline-anchored: only clamped, never rippled
     }
 
     func isHook(_ id: Int) -> Bool { hookId == id }
@@ -430,19 +478,23 @@ final class EditPlanStore {
         let maxLen = s.endSeconds - s.startSeconds
         let clamped = max(0.5, min(seconds, maxLen))
         order[i].outPoint = order[i].inPoint + clamped
+        clampNarrationIntoBounds()
     }
 
     /// Frame-accurate two-edge trim on a base clip, clamped to the segment's real source bounds. Unlike
     /// `setSourceDuration` these let the in-point move and can grow a clip back toward the AI's bounds.
+    /// (These change `baseDuration` without rippling, so the narration clamp runs here too.)
     func setIn(_ cid: UUID, toSource newIn: Double) {
         guard let i = clipIndex(cid), let s = segmentsById[order[i].sourceSegmentId] else { return }
         let snapped = (newIn * 30).rounded() / 30
         order[i].inPoint = max(s.startSeconds, min(snapped, order[i].outPoint - 1.0 / 30))
+        clampNarrationIntoBounds()
     }
     func setOut(_ cid: UUID, toSource newOut: Double) {
         guard let i = clipIndex(cid), let s = segmentsById[order[i].sourceSegmentId] else { return }
         let snapped = (newOut * 30).rounded() / 30
         order[i].outPoint = min(s.endSeconds, max(snapped, order[i].inPoint + 1.0 / 30))
+        clampNarrationIntoBounds()
     }
 
     /// Remove a single clip instance from the spine (keeps the source available elsewhere).
@@ -492,6 +544,9 @@ final class EditPlanStore {
     func setSpeed(_ cid: UUID, _ value: Double) {
         guard let i = clipIndex(cid) else { return }
         order[i].speed = max(0.25, min(4, value))
+        // Speed re-times the FOOTAGE; takes keep their absolute position and are never speed-scaled —
+        // but the timeline just grew/shrank, so clamp them into the new bounds.
+        clampNarrationIntoBounds()
     }
     func setClipVolume(_ cid: UUID, _ value: Float) {
         guard let i = clipIndex(cid) else { return }
@@ -521,10 +576,26 @@ final class EditPlanStore {
 
     /// Add a B-roll overlay from `sourceId`, starting at `start` seconds on the base timeline.
     func addOverlay(sourceId: Int, at start: Double) {
-        guard segmentsById[sourceId] != nil else { return }
+        guard let seg = segmentsById[sourceId] else { return }
         let clampedStart = max(0, min(start, max(0, baseDuration - 0.5)))
         let dur = min(sourceLength(sourceId), max(0.5, baseDuration - clampedStart))
-        brollLane.append(OverlayClip(sourceSegmentId: sourceId, startOnBase: clampedStart, duration: max(0.3, dur)))
+        brollLane.append(OverlayClip(sourceSegmentId: sourceId, startOnBase: clampedStart,
+                                     duration: max(0.3, dur), sourceStart: seg.startSeconds))
+    }
+
+    /// The resolved source in-point for an overlay — its stored `sourceStart`, or the segment's own start for
+    /// a legacy/unset value. All reads of an overlay's in-point (render, audio, trim, split) go through here.
+    func overlaySourceStart(_ o: OverlayClip) -> Double {
+        o.sourceStart >= 0 ? o.sourceStart : (segmentsById[o.sourceSegmentId]?.startSeconds ?? 0)
+    }
+
+    /// Resolve any sentinel `sourceStart` to the segment start (head-anchored) — run after loading a lane from
+    /// a plan seed or a persisted `EditState`, so old projects keep their exact behavior and every stored
+    /// overlay carries a real in-point thereafter.
+    private func normalizeOverlaySourceStarts() {
+        for i in brollLane.indices where brollLane[i].sourceStart < 0 {
+            brollLane[i].sourceStart = segmentsById[brollLane[i].sourceSegmentId]?.startSeconds ?? 0
+        }
     }
 
     func moveOverlay(_ id: UUID, toStart start: Double) {
@@ -540,25 +611,65 @@ final class EditPlanStore {
         brollLane[i].duration = max(0.3, min(duration, maxDur))
     }
 
-    /// Set an overlay's `[start, end]` directly (used by edge-trim handles), clamped to a 0.3s
-    /// minimum, the source length, and the base bounds.
-    func setOverlayBounds(_ id: UUID, start: Double, end: Double) {
-        guard let i = brollLane.firstIndex(where: { $0.id == id }) else { return }
-        let srcLen = sourceLength(brollLane[i].sourceSegmentId)
-        var s = max(0, start)
-        var e = min(baseDuration, end)
-        if e - s > srcLen { e = s + srcLen }
-        if e - s < 0.3 { e = min(baseDuration, s + 0.3); s = max(0, e - 0.3) }
+    /// Left-edge trim: move the overlay's start to `newStart`, keeping the RIGHT edge fixed and advancing the
+    /// source in-point by the same amount — so the LATER source content plays (true left-crop, like the spine).
+    /// Clamped to a 0.3s minimum, the timeline start, and the available source head/tail.
+    func setOverlayLeftEdge(_ id: UUID, toStart newStart: Double) {
+        guard let i = brollLane.firstIndex(where: { $0.id == id }), let seg = segmentsById[brollLane[i].sourceSegmentId] else { return }
+        let o = brollLane[i]
+        let inNow = overlaySourceStart(o)
+        let end = o.endOnBase
+        let segStart = seg.startSeconds
+        let headRoom = inNow - segStart                     // how far left we may extend (source before the in-point)
+        let minStart = max(0, o.startOnBase - headRoom)     // can't pull in earlier source than exists / before t0
+        let maxStart = end - 0.3                             // keep ≥0.3s of clip
+        let s = min(max(newStart, minStart), maxStart)
+        let delta = s - o.startOnBase                        // + = trimming head off; − = extending left
         brollLane[i].startOnBase = s
-        brollLane[i].duration = max(0.3, e - s)
+        brollLane[i].duration = max(0.3, end - s)
+        brollLane[i].sourceStart = inNow + delta
+    }
+
+    /// Right-edge trim: move the overlay's end to `newEnd`, keeping the start + source in-point fixed (only the
+    /// duration changes). Clamped to a 0.3s minimum, the base bounds, and the source tail after the in-point.
+    func setOverlayRightEdge(_ id: UUID, toEnd newEnd: Double) {
+        guard let i = brollLane.firstIndex(where: { $0.id == id }), let seg = segmentsById[brollLane[i].sourceSegmentId] else { return }
+        let o = brollLane[i]
+        let inNow = overlaySourceStart(o)
+        let segEnd = seg.startSeconds + sourceLength(o.sourceSegmentId)
+        let maxEnd = min(baseDuration, o.startOnBase + (segEnd - inNow))   // can't run past the available source tail
+        let e = max(min(newEnd, maxEnd), o.startOnBase + 0.3)
+        brollLane[i].sourceStart = inNow                     // resolve any sentinel; in-point unchanged
+        brollLane[i].duration = max(0.3, e - o.startOnBase)
     }
 
     func removeOverlay(_ id: UUID) { brollLane.removeAll { $0.id == id } }
 
     func swapOverlaySource(_ id: UUID, to sourceId: Int) {
-        guard let i = brollLane.firstIndex(where: { $0.id == id }), segmentsById[sourceId] != nil else { return }
+        guard let i = brollLane.firstIndex(where: { $0.id == id }), let seg = segmentsById[sourceId] else { return }
         brollLane[i].sourceSegmentId = sourceId
-        trimOverlay(id, duration: brollLane[i].duration)   // re-clamp to the new source length
+        brollLane[i].sourceStart = seg.startSeconds         // new source → reset the in-point to its head
+        trimOverlay(id, duration: brollLane[i].duration)    // re-clamp to the new source length
+    }
+
+    /// Split an overlay at assembled-timeline second `timelineT` into two independent overlays — the halves
+    /// carry contiguous source slices (right's in-point continues where left's ended). No-op unless `timelineT`
+    /// lands strictly inside the overlay (frame-margin). Returns the RIGHT half's id (to select after).
+    @discardableResult
+    func splitOverlay(_ id: UUID, at timelineT: Double) -> UUID? {
+        guard let i = brollLane.firstIndex(where: { $0.id == id }) else { return nil }
+        let o = brollLane[i]
+        let eps = 1.0 / 30
+        guard timelineT > o.startOnBase + eps, timelineT < o.endOnBase - eps else { return nil }
+        pushUndo()
+        let leftDur = timelineT - o.startOnBase
+        let inNow = overlaySourceStart(o)
+        let left = OverlayClip(sourceSegmentId: o.sourceSegmentId, startOnBase: o.startOnBase,
+                               duration: leftDur, sourceStart: inNow, volume: o.volume)
+        let right = OverlayClip(sourceSegmentId: o.sourceSegmentId, startOnBase: timelineT,
+                                duration: o.endOnBase - timelineT, sourceStart: inNow + leftDur, volume: o.volume)
+        brollLane.replaceSubrange(i...i, with: [left, right])
+        return right.id
     }
 
     private func removeOverlays(of segmentId: Int) {
@@ -601,6 +712,191 @@ final class EditPlanStore {
     }
 
     func deleteTextOverlay(_ id: UUID) { textOverlays.removeAll { $0.id == id } }
+
+    // MARK: - Narration lane (Layer "Voiceover" — recorded takes over the assembled timeline)
+    //
+    // Takes are TIMELINE-anchored, unlike B-roll overlays (content-anchored via the ripple system):
+    // narration is performed against the finished picture, so spine edits never slide it — a take only
+    // gets clamped when the timeline shrinks past it. Changing a clip's speed re-times the FOOTAGE;
+    // narration keeps its absolute position and is never pitch/speed-scaled.
+
+    /// Where recording from `t` must stop: the next take's left edge, or the video's end.
+    func narrationBoundary(after t: Double) -> Double {
+        let next = narrationLane.map(\.startOnBase).filter { $0 > t + 0.05 }.min() ?? baseDuration
+        return min(baseDuration, next)
+    }
+
+    /// Can a take start at `t`? Not inside an existing take, and with ≥0.5s of room before the boundary.
+    func canRecord(at t: Double) -> Bool {
+        guard baseDuration > 0, t < baseDuration - 0.1 else { return false }
+        guard !narrationLane.contains(where: { t >= $0.startOnBase - 0.02 && t < $0.endOnBase - 0.02 }) else { return false }
+        return narrationBoundary(after: t) - t >= NarrationRecorder.minTakeSeconds
+    }
+
+    /// Land a finished take on the lane, capped so it can't overlap the next take / run past the end.
+    /// Caller pushes undo (same convention as `appendImportedSegments`).
+    @discardableResult
+    func addNarration(fileName: String, fileDuration: Double, at start: Double, cappedTo boundary: Double) -> NarrationClip {
+        let out = min(fileDuration, max(0.1, boundary - start))
+        let clip = NarrationClip(fileName: fileName, startOnBase: start,
+                                 inPoint: 0, outPoint: out, fileDuration: fileDuration)
+        narrationLane.append(clip)
+        narrationLane.sort { $0.startOnBase < $1.startOnBase }
+        return clip
+    }
+
+    func removeNarration(_ id: UUID) { narrationLane.removeAll { $0.id == id } }
+
+    func setNarrationVolume(_ id: UUID, _ value: Float) {
+        guard let i = narrationLane.firstIndex(where: { $0.id == id }) else { return }
+        narrationLane[i].volume = max(0, min(1, value))
+    }
+
+    /// Move a take to `proposed`, clamped into the timeline and snapped OUT of any overlap with the
+    /// other takes: an overlapping drop lands flush against the nearer side of the chip it hit (or the
+    /// far side if that spot is taken). Reverts to its old position when no gap fits — the lane never
+    /// holds a partial overlap.
+    func moveNarration(_ id: UUID, toStart proposed: Double) {
+        guard let i = narrationLane.firstIndex(where: { $0.id == id }) else { return }
+        let dur = narrationLane[i].duration
+        let maxStart = max(0, baseDuration - dur)
+        let others = narrationLane.filter { $0.id != id }
+
+        func overlaps(_ s: Double) -> Bool {
+            others.contains { s < $0.endOnBase - 0.001 && $0.startOnBase + 0.001 < s + dur }
+        }
+        var start = max(0, min(proposed, maxStart))
+        if overlaps(start) {
+            guard let hit = others.first(where: { start < $0.endOnBase && $0.startOnBase < start + dur })
+            else { return }
+            let preferLeft = (start + dur / 2) < (hit.startOnBase + hit.endOnBase) / 2
+            let candidates = preferLeft ? [hit.startOnBase - dur, hit.endOnBase]
+                                        : [hit.endOnBase, hit.startOnBase - dur]
+            guard let landed = candidates
+                .map({ max(0, min($0, maxStart)) })
+                .first(where: { !overlaps($0) }) else { return }   // no gap → revert
+            start = landed
+        }
+        narrationLane[i].startOnBase = start
+        narrationLane.sort { $0.startOnBase < $1.startOnBase }
+    }
+
+    /// Two-edge trim. The LEFT edge keeps **picture-sync**: pulling it right consumes file head
+    /// (`inPoint` advances exactly with `startOnBase`) so the remaining words stay glued to the frames
+    /// they were spoken over — trimming never slides the audio. It can re-extend left only as far as
+    /// unused file head exists. The RIGHT edge just resizes the window into the file. Both edges clamp
+    /// against the neighbor takes, the timeline end, and a 0.3s minimum.
+    func setNarrationBounds(_ id: UUID, start: Double, end: Double) {
+        guard let i = narrationLane.firstIndex(where: { $0.id == id }) else { return }
+        var c = narrationLane[i]
+        let others = narrationLane.filter { $0.id != id }
+        let prevEnd = others.filter { $0.startOnBase < c.startOnBase }.map(\.endOnBase).max() ?? 0
+        let nextStart = others.filter { $0.startOnBase > c.startOnBase }.map(\.startOnBase).min() ?? baseDuration
+
+        let minStart = max(0, max(prevEnd, c.startOnBase - c.inPoint))
+        let s = max(minStart, min(start, c.endOnBase - 0.3))
+        c.inPoint += s - c.startOnBase
+        c.startOnBase = s
+
+        let maxEnd = min(min(nextStart, baseDuration), c.startOnBase + (c.fileDuration - c.inPoint))
+        let e = min(maxEnd, max(end, c.startOnBase + 0.3))
+        c.outPoint = c.inPoint + (e - c.startOnBase)
+        narrationLane[i] = c
+    }
+
+    /// Split a take at assembled-timeline second `timelineT` into two adjacent takes — the halves carry
+    /// contiguous slices of the SAME recording (right's `inPoint` continues where left's `outPoint` ended;
+    /// narration plays 1:1 with the timeline, so the file-local split point is just `inPoint + leftDur`).
+    /// Both halves reference the same file — safe because `removeNarration` never deletes the file on disk.
+    /// No-op unless `timelineT` lands strictly inside the take (frame-margin). Returns the RIGHT half's id.
+    @discardableResult
+    func splitNarration(_ id: UUID, at timelineT: Double) -> UUID? {
+        guard let i = narrationLane.firstIndex(where: { $0.id == id }) else { return nil }
+        let c = narrationLane[i]
+        let eps = 1.0 / 30
+        guard timelineT > c.startOnBase + eps, timelineT < c.endOnBase - eps else { return nil }
+        pushUndo()
+        let splitIn = c.inPoint + (timelineT - c.startOnBase)
+        let left = NarrationClip(fileName: c.fileName, startOnBase: c.startOnBase,
+                                 inPoint: c.inPoint, outPoint: splitIn,
+                                 fileDuration: c.fileDuration, volume: c.volume)
+        let right = NarrationClip(fileName: c.fileName, startOnBase: timelineT,
+                                  inPoint: splitIn, outPoint: c.outPoint,
+                                  fileDuration: c.fileDuration, volume: c.volume)
+        narrationLane.replaceSubrange(i...i, with: [left, right])
+        narrationLane.sort { $0.startOnBase < $1.startOnBase }
+        return right.id
+    }
+
+    /// Clamp takes into a (possibly shrunken) timeline after a spine edit: starts pull back inside,
+    /// tails trim to fit, and neighbors never overlap. Takes are never dropped — worst case one
+    /// renders very short near the end. (Growing the timeline never moves a take: they're
+    /// timeline-anchored, not content-anchored like B-roll.)
+    private func clampNarrationIntoBounds() {
+        let total = baseDuration
+        guard total > 0 else { narrationLane.removeAll(); return }
+        var lastEnd = 0.0
+        narrationLane.sort { $0.startOnBase < $1.startOnBase }
+        for i in narrationLane.indices {
+            var c = narrationLane[i]
+            c.startOnBase = max(lastEnd, min(c.startOnBase, max(0, total - 0.3)))
+            let maxOut = c.inPoint + max(0.05, total - c.startOnBase)
+            c.outPoint = max(c.inPoint + 0.05, min(c.outPoint, min(c.fileDuration, maxOut)))
+            narrationLane[i] = c
+            lastEnd = c.endOnBase
+        }
+    }
+
+    /// "Under voiceover" duck level (0…1) — how loud the original bed stays while a take plays.
+    /// Applied at mix time by `AudioDucking`; never written into clip volumes.
+    func setVoDuckLevel(_ value: Float) {
+        voDuckLevel = max(0, min(1, value))
+    }
+
+    /// First-take bookkeeping: returns true exactly once per project (the view shows the "original
+    /// audio dips under your voiceover" toast). No volume writes — the duck itself is always-on,
+    /// scoped to takes, at `voDuckLevel`.
+    func noteFirstTake() -> Bool {
+        guard !didAutoDuck, narrationLane.count == 1 else { return false }
+        didAutoDuck = true
+        return true
+    }
+
+    /// Drop takes whose file no longer exists (resume after the app container changed / manual cleanup).
+    /// Returns how many were removed so the view can mention it once.
+    @discardableResult
+    func pruneMissingNarration() -> Int {
+        guard let dir = narrationDirectory, !narrationLane.isEmpty else { return 0 }
+        let before = narrationLane.count
+        narrationLane.removeAll { !FileManager.default.fileExists(atPath: dir.appendingPathComponent($0.fileName).path) }
+        let dropped = before - narrationLane.count
+        if dropped > 0 { Log.audio("⚠️ Pruned \(dropped) narration take(s) with missing files.") }
+        return dropped
+    }
+
+    /// Render-ready narration slices for BOTH compositors. Resolves file names against
+    /// `narrationDirectory`, skips missing files (warn) and takes starting past the (possibly shrunken)
+    /// timeline end. A slight overhang past `baseDuration` is fine — the assembler already freeze-frames
+    /// the last instruction to cover an audio tail, and the preview simply ends.
+    func narrationPieces() -> [NarrationPiece] {
+        guard !narrationLane.isEmpty else { return [] }
+        guard let dir = narrationDirectory else {
+            Log.audio("⚠️ narrationPieces: no narration directory set — \(narrationLane.count) take(s) skipped.")
+            return []
+        }
+        return narrationLane
+            .filter { $0.startOnBase < baseDuration - 0.02 && $0.duration > 0.05 }
+            .sorted { $0.startOnBase < $1.startOnBase }
+            .compactMap { clip in
+                let url = dir.appendingPathComponent(clip.fileName)
+                guard FileManager.default.fileExists(atPath: url.path) else {
+                    Log.audio("⚠️ narration file missing on disk: \(clip.fileName) — skipped.")
+                    return nil
+                }
+                return NarrationPiece(url: url, startOnBase: clip.startOnBase,
+                                      fileIn: clip.inPoint, fileOut: clip.outPoint, volume: clip.volume)
+            }
+    }
 
     /// Auto-fill the overlay lane from Gemini's `broll_placements` — each anchored to a spine segment +
     /// offset (NOT timeline seconds; the spine doesn't exist until now). Sparse, contextual, varied: the
@@ -647,7 +943,8 @@ final class EditPlanStore {
 
             guard dur >= 0.3 else { continue }                                   // too short / pushed out
             guard covered + dur <= coverageCap else { continue }                 // template coverage cap
-            lane.append(OverlayClip(sourceSegmentId: p.brollSegmentId, startOnBase: start, duration: dur))
+            lane.append(OverlayClip(sourceSegmentId: p.brollSegmentId, startOnBase: start, duration: dur,
+                                    sourceStart: src.startSeconds))
             covered += dur
         }
         return lane.sorted { $0.startOnBase < $1.startOnBase }
@@ -693,10 +990,10 @@ final class EditPlanStore {
             guard let bw = base.first(where: { mid >= $0.start && mid < $0.end }) else { continue }
 
             if let o = overlays.first(where: { mid >= $0.startOnBase && mid < $0.endOnBase }),
-               let src = segmentsById[o.sourceSegmentId] {
+               segmentsById[o.sourceSegmentId] != nil {
                 slots.append(RenderSlot(baseStart: a, duration: b - a,
                                         videoSegId: o.sourceSegmentId,
-                                        videoSourceStart: src.startSeconds + (a - o.startOnBase),
+                                        videoSourceStart: overlaySourceStart(o) + (a - o.startOnBase),
                                         videoSpeed: 1, isOverlay: true))
             } else {
                 // Source advances `speed`× faster than the timeline within a sped base clip.
@@ -711,6 +1008,7 @@ final class EditPlanStore {
     }
 
     /// Base-spine audio (the voice), one piece per main clip, in order — each at its own volume/speed.
+    /// The voiceover duck + track mute are applied on top at mix time (`AudioDucking`), never here.
     func baseAudioPieces() -> [AudioPiece] {
         var t = 0.0
         var out: [AudioPiece] = []
@@ -728,9 +1026,9 @@ final class EditPlanStore {
     /// Overlay audio — only the overlays the creator un-muted (volume > 0).
     func overlayAudioPieces() -> [AudioPiece] {
         brollLane.compactMap { o in
-            guard o.volume > 0.001, let s = segmentsById[o.sourceSegmentId] else { return nil }
+            guard o.volume > 0.001, segmentsById[o.sourceSegmentId] != nil else { return nil }
             return AudioPiece(segId: o.sourceSegmentId, baseStart: o.startOnBase, timelineDuration: o.duration,
-                              sourceStart: s.startSeconds, sourceDuration: o.duration, volume: o.volume, speed: 1)
+                              sourceStart: overlaySourceStart(o), sourceDuration: o.duration, volume: o.volume, speed: 1)
         }
     }
 

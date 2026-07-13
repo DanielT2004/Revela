@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Screen 3 — Processing. Runs the real pipeline behind the mockup's calm terracotta arc:
 /// M2 merge+compress → M3 Gemini analysis. For M3 it shows the RAW Gemini JSON on screen (and logs
@@ -13,6 +14,9 @@ struct ProcessingView: View {
 
     /// Drives the gentle pulse on the notice icon + the blinking badge dot.
     @State private var pulse = false
+
+    /// "Stop this edit?" confirmation — a running analysis is paid + slow, so never cancel on a stray tap.
+    @State private var confirmCancel = false
 
     /// Frames pulled from the merged proxy, used only on a kill-recovery resume where the original
     /// `SourceClip`s (and their thumbnails) are gone — so the loader shows the real footage, not gradients.
@@ -42,11 +46,28 @@ struct ProcessingView: View {
                 workingState
             }
         }
+        // The escape hatch: a quiet Cancel so a regretted submission never traps anyone here (the error
+        // state has its own Back/Retry bar, so this shows only while running).
+        .overlay(alignment: .topLeading) {
+            if analysis.phase == .running {
+                Button("Cancel") { confirmCancel = true }
+                    .font(VeFont.sans(13, weight: .semibold))
+                    .foregroundStyle(Color.veWarmGray)
+                    .padding(.leading, 22)
+                    .padding(.top, 54)
+            }
+        }
+        .confirmationDialog("Stop this edit?", isPresented: $confirmCancel, titleVisibility: .visible) {
+            Button("Stop the edit", role: .destructive) { cancelAnalysis() }
+            Button("Keep working", role: .cancel) {}
+        } message: {
+            Text("Your clips and brief stay put — you can send it again anytime.")
+        }
         // Idempotent — safe to fire on every (re)mount; the coordinator runs the pipeline at most once
         // per submitted clip set and survives this view disappearing. The active style (if any) is injected.
         .task { analysis.start(session: session, projects: projects,
                                styleBlock: StyleConstraintBuilder.block(for: templates.active),
-                               briefBlock: BriefPromptBuilder.block(for: session.brief),
+                               briefBlock: BriefPromptBuilder.block(for: session.brief, template: templates.active),
                                brollCoverageTarget: brollCoverageTarget) }
         // Completion → the celebratory reveal is handled centrally in `RootView` (so it also fires from
         // the Home "Processing" card), via its `analysis.phase` observer. Here we just run the loader pulse.
@@ -72,6 +93,14 @@ struct ProcessingView: View {
             if let img = await ThumbnailService.thumbnail(for: url, at: t) { imgs.append(img) }
         }
         if !imgs.isEmpty { proxyThumbs = imgs }
+    }
+
+    /// Stop the run: warning haptic (destructive), reset the coordinator, and step back — to the Brief
+    /// when the creator came from there (clips + brief intact), or Home when they came from its card.
+    private func cancelAnalysis() {
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        analysis.cancel()
+        router.back()
     }
 
     // MARK: working — "Column drift" loader (Claude Design · Vela Loading 01, Option C)
@@ -134,7 +163,9 @@ struct ProcessingView: View {
                 Text(closeable ? "You're free to go" : "Keep Vela open")
                     .font(VeFont.sans(13.5, weight: .heavy))
                     .foregroundStyle(closeable ? Color.veSage : Color(hex: 0x8A3A24))
-                Text(closeable ? "Close the app — we'll notify you when it's ready."
+                Text(closeable ? (NotificationService.shared.notificationsEnabled
+                                    ? "Close the app — we'll notify you when it's ready."
+                                    : "Notifications are off — check back in a minute or two.")
                                : "Don't close the app while we prep.")
                     .font(VeFont.sans(11.5))
                     .foregroundStyle(closeable ? Color.veNoteText : Color(hex: 0xA0533C))
@@ -187,6 +218,8 @@ struct ProcessingView: View {
     }
 
     private var stageSubtext: String {
+        // Upload is opaque, so this is a heuristic: no movement for ~15s during the uploading stage.
+        if analysis.stage == .uploading, analysis.isSlow { return "Still uploading — your connection looks slow." }
         if analysis.canCloseApp { return "Usually about a minute." }
         if let eta = analysis.etaSeconds { return Self.etaText(eta) }
         return "Hang tight…"
@@ -345,7 +378,7 @@ struct ProcessingView: View {
                     .font(VeFont.sans(15, weight: .bold)).foregroundStyle(Color.veWarmGray)
                 Button("Retry") { analysis.retry(session: session, projects: projects,
                                                  styleBlock: StyleConstraintBuilder.block(for: templates.active),
-                                                 briefBlock: BriefPromptBuilder.block(for: session.brief),
+                                                 briefBlock: BriefPromptBuilder.block(for: session.brief, template: templates.active),
                                                  brollCoverageTarget: brollCoverageTarget) }
                     .font(VeFont.sans(15, weight: .bold)).foregroundStyle(Color.veTerracotta)
             }

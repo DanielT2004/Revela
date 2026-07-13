@@ -6,7 +6,8 @@ enum AppScreen: Equatable {
     case onboarding
     case home, picker, brief, processing, segments, editor, hook, export, profile
     // Style templates
-    case templateLibrary, createSource, createSelect, createAnalyzing, createReview, templateEditor
+    case templateLibrary, createSource, createSelect, createAnalyzing, createReveal, createReview, templateEditor
+    case refineAnalyzing, refineReveal
 
     var title: String {
         switch self {
@@ -19,13 +20,16 @@ enum AppScreen: Equatable {
         case .editor:          return "Editor"
         case .hook:            return "Pick your hook"
         case .export:          return "Export"
-        case .profile:         return "Your style"
+        case .profile:         return "Profile"
         case .templateLibrary: return "Your templates"
         case .createSource:    return "New template"
         case .createSelect:    return "Pick videos"
         case .createAnalyzing: return "Learning"
+        case .createReveal:    return "Your style"
         case .createReview:    return "Review & save"
         case .templateEditor:  return "Review style"
+        case .refineAnalyzing: return "Sharpening"
+        case .refineReveal:    return "What held up"
         }
     }
 }

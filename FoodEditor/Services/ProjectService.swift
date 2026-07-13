@@ -13,21 +13,53 @@ final class ProjectService {
     private(set) var currentId: UUID?
     private(set) var currentStatus: ProjectStatus = .triage
     private var createdAt = Date()
-    private var name = "Untitled cut"
+    private(set) var name = "Untitled cut"
 
     /// The durable proxy location for the current project (where `save` persists the ~720p proxy). Lets a
     /// resumed session repoint off its ephemeral PendingAnalysis copy onto this stable file.
     var currentProxyURL: URL? { currentId.map { store.proxyURL(for: $0) } }
+
+    /// Where the current project's voiceover takes are recorded to (survives app kill; deleted with the
+    /// project). Nil only before a project exists — the Polish page falls back to a temp dir then.
+    var narrationDirectory: URL? { currentId.map { store.narrationDirectory(for: $0) } }
 
     init(store: ProjectStore = FileProjectStore.shared) { self.store = store }
 
     /// Saved projects for the Home grid (newest-edited first).
     func allProjects() -> [Project] { store.list() }
 
-    /// The saved Home-tile poster for a project (nil → tile shows a gradient placeholder).
-    func poster(for id: UUID) -> UIImage? { store.posterImage(for: id) }
+    /// In-memory cache of decoded Home-tile posters, keyed by project id. `NSCache` is thread-safe and
+    /// evicts under memory pressure. Keeps the project list from re-reading + re-decoding poster JPEGs from
+    /// disk on the main thread every layout pass (the cause of the ~1–2s scroll stall on returning to Home).
+    private let posterCache = NSCache<NSString, UIImage>()
 
-    func delete(_ id: UUID) { try? store.delete(id: id) }
+    /// A poster already decoded in memory — instant, no disk. Nil on a cold cache; the row shows its gradient
+    /// placeholder until `loadPoster` fills it.
+    func cachedPoster(for id: UUID) -> UIImage? { posterCache.object(forKey: id.uuidString as NSString) }
+
+    /// Read + decode a project's Home-tile poster OFF the main thread and cache it. Returns nil when the
+    /// project has no poster. Mirrors `ThumbnailService`'s async+cache pattern used for clip thumbnails.
+    func loadPoster(for id: UUID) async -> UIImage? {
+        let key = id.uuidString as NSString
+        if let hit = posterCache.object(forKey: key) { return hit }
+        guard let url = store.posterURL(for: id) else { return nil }
+        let image = await Self.decodePoster(at: url)
+        if let image { posterCache.setObject(image, forKey: key) }
+        return image
+    }
+
+    /// Load the JPEG and force its decode on a background thread, so the first on-screen draw doesn't hitch.
+    private static func decodePoster(at url: URL) async -> UIImage? {
+        await Task.detached(priority: .utility) {
+            guard let data = try? Data(contentsOf: url), let img = UIImage(data: data) else { return nil }
+            return await img.byPreparingForDisplay() ?? img
+        }.value
+    }
+
+    func delete(_ id: UUID) {
+        posterCache.removeObject(forKey: id.uuidString as NSString)
+        try? store.delete(id: id)
+    }
 
     // MARK: - Lifecycle
 
@@ -69,6 +101,12 @@ final class ProjectService {
         session.merged = ProcessedVideo(url: proxyURL, metadata: meta, inputBytes: 0, elapsed: 0, sourceSpans: [proxySpan])
         session.store = EditPlanStore(plan: loaded.plan, restoring: loaded.state)
         session.originSources = loaded.sources   // for full-res re-resolution at export (CP1.4)
+        // Point the restored narration takes at this project's narration/ dir and drop any whose file
+        // vanished (the lane persists names only). The count surfaces once as a Polish toast.
+        session.store?.narrationDirectory = store.narrationDirectory(for: project.id)
+        if let dropped = session.store?.pruneMissingNarration(), dropped > 0 {
+            session.store?.prunedNarrationOnResume = dropped
+        }
         adopt(loaded.meta)
         Log.app("📂 Resumed \(loaded.meta.name) [\(loaded.meta.status.rawValue)] — \(loaded.state.order.count) clips.")
 
@@ -106,9 +144,32 @@ final class ProjectService {
         catch { Log.app("⚠️ Project save failed: \(error.localizedDescription)") }
     }
 
+    // MARK: - Rename + feedback
+
+    /// Rename the current project and persist immediately. Trimmed; an empty or unchanged name is a no-op.
+    /// `name` is the single source of truth (written into `project.json` by `save`), so the editor header
+    /// and the Home tile both reflect it. Returns true when the rename was committed.
+    @discardableResult
+    func rename(to newName: String, session: VideoSession) -> Bool {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != name else { return false }
+        name = trimmed
+        save(session: session)   // metadata-only save — `reaching` nil, so status can't downgrade
+        Log.app("✏️ Renamed project → “\(trimmed)”.")
+        return true
+    }
+
+    /// Persist the export "did this feel like you?" verdict durably (survives kill / re-open) so the future
+    /// style-learning loop has real signal. Mutates the live store, then saves.
+    func recordExportFeedback(_ verdict: Bool, session: VideoSession) {
+        session.store?.exportFeedback = verdict
+        save(session: session)
+        Log.app("👍 Export feedback saved: \(verdict ? "loved it" : "not quite").")
+    }
+
     // MARK: - Helpers
 
-    /// A short, friendly title derived from the AI's one-line summary (no naming UI yet).
+    /// A short, friendly title derived from the AI's one-line summary (used until the user renames).
     private static func deriveName(_ plan: EditPlan) -> String {
         let s = plan.videoSummary.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return "Untitled cut" }

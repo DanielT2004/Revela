@@ -1,0 +1,15 @@
+{
+  "_readme": "Style-extraction A/B. Fixtures are FINISHED TikToks (not raw proxies) — AirDrop them from the phone and fill in truth.json per fixture (see fixtures/style/duo-example/truth.json). Runs on flash-latest for production parity; add gemini-pro-latest to models[] as an optional arm. schemaOn true uses style-schema.json (constrained decoding) — the A/B decides whether it ships.",
+  "fixtures": [
+    {
+      "id": "duo-example",
+      "path": "fixtures/style/duo-example/video.mp4",
+      "truth": "fixtures/style/duo-example/truth.json"
+    }
+  ],
+  "prompts": ["style-baseline.txt", "style-v2.txt"],
+  "models": ["gemini-flash-latest"],
+  "schemaOn": [false, true],
+  "schemaFile": "style-schema.json",
+  "runs": 3
+}

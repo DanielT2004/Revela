@@ -38,16 +38,20 @@ final class TemplateService {
     /// Upsert a template. The first template ever saved becomes active automatically. Pass `poster` only
     /// when there's a fresh thumbnail to write (analysis) — editing an existing template passes nil to keep it.
     func save(_ template: StyleTemplate, poster: UIImage? = nil) {
-        do { try store.save(template, poster: poster) }
+        // Any template touched by this build persists at the current schema (older builds gate at their
+        // own version and skip it — that's the gate's purpose; the fields all decode defensively).
+        var t = template
+        t.schemaVersion = max(t.schemaVersion, StyleTemplate.currentSchemaVersion)
+        do { try store.save(t, poster: poster) }
         catch { Log.app("⚠️ Template save failed: \(error.localizedDescription)"); return }
         let wasFirst = templates.isEmpty
-        if let idx = templates.firstIndex(where: { $0.id == template.id }) {
-            templates[idx] = template
+        if let idx = templates.firstIndex(where: { $0.id == t.id }) {
+            templates[idx] = t
         } else {
-            templates.insert(template, at: 0)
+            templates.insert(t, at: 0)
         }
         templates.sort { $0.createdAt > $1.createdAt }
-        if wasFirst || activeId == nil { setActive(template.id) }
+        if wasFirst || activeId == nil { setActive(t.id) }
     }
 
     func setActive(_ id: UUID?) {

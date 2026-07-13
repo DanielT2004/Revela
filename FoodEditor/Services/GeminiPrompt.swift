@@ -97,7 +97,7 @@ enum GeminiPrompt {
     You are an expert short-form video editor who reverse-engineers the editing style of food content creators. I'm going to give you a FINISHED, already-edited TikTok made by one creator. Your job is NOT to suggest edits. Your job is to study how THIS creator edits and produce a structured "style profile" describing their personal editing patterns, so another system can recreate their style on new raw footage.
 
     Two guiding principles:
-    1. Capture what makes THIS creator and this specific videodistinctive. Do not flatten them into generic categories. Wherever a preset option doesn't fit what you actually see, use the provided open text field instead of forcing a wrong label. It is better to describe accurately in your own words than to pick the closest preset.
+    1. Capture what makes THIS creator and this specific video distinctive. Do not flatten them into generic categories. Wherever a preset option doesn't fit what you actually see, use the provided open text field instead of forcing a wrong label. It is better to describe accurately in your own words than to pick the closest preset.
     2. Describe what they DO, not what they SHOULD do. This is observation, not advice.
 
     Return ONLY a valid JSON object — no intro text, no explanation, no markdown code blocks. Just raw JSON.
@@ -114,11 +114,17 @@ enum GeminiPrompt {
       },
 
       "hook": {
-        "type": "food-closeup | bite-reaction | talking-head-claim | text-on-screen | plating | action | pov | other",
+        "type": "food-closeup | bite-reaction | talking-head-claim | text-on-screen | plating | action | pov | social-proof-montage | other",
         "type_custom": "if 'other' or nuanced, describe the hook in your own words; else null",
         "opens_within_seconds": number,
         "has_text_overlay": true/false,
-        "description": "one sentence on how they open and why it grabs attention"
+        "description": "one sentence on how they open and why it grabs attention",
+        "montage": {
+          "is_montage": true/false,
+          "source": "other-creators | own-footage",
+          "clip_count_estimate": number,
+          "avg_clip_seconds": number
+        }
       },
 
       "pacing": {
@@ -149,11 +155,11 @@ enum GeminiPrompt {
         "arc": ["hook", "context", "dish-1", "tasting", "verdict"],
         "sections": [
           { "section": "intro",  "purpose": "what the opening does for the viewer",
-            "beats": [ { "label": "introduce restaurant", "time_hint": "0-2s" }, { "label": "food close-up hook", "time_hint": "2-4s" } ] },
+            "beats": [ { "label": "introduce restaurant", "time_hint": "0-2s", "example": "" }, { "label": "food close-up hook", "time_hint": "2-4s", "example": "sauce drizzle on the sandwich" } ] },
           { "section": "middle", "purpose": "what the body covers",
-            "beats": [ { "label": "first-bite reaction", "time_hint": "8-11s" } ] },
+            "beats": [ { "label": "taste each item one at a time", "time_hint": "8-24s", "example": "chicken skin, then the thigh" } ] },
           { "section": "end",    "purpose": "how it wraps",
-            "beats": [ { "label": "verdict / rating", "time_hint": "26-30s" } ] }
+            "beats": [ { "label": "verdict / rating", "time_hint": "26-30s", "example": "" } ] }
         ],
         "notes": "one sentence describing their typical narrative flow"
       },
@@ -177,6 +183,39 @@ enum GeminiPrompt {
         "type_custom": "if 'other' or nuanced, describe; else null",
         "description": "one sentence on how they end"
       },
+
+      "verbal_style": {
+        "tone": "2-6 words on how they SOUND (deadpan, hyped, sarcastic duo banter, whispery)",
+        "pov": "solo-first-person | duo-banter | narrator-third-person | other — how they address the viewer",
+        "rating_format": "if they score food, EXACTLY how, as a reusable formula (e.g. 'a rating out of 10, spoken as X out of 10, sometimes with a decimal'); null if they never rate",
+        "rating_scope": "overall | per-item | both — one final score vs. a score after each dish; null if they never rate",
+        "signoff": "their closing line VERBATIM if they have one (e.g. 'we'll see you in the next one'); null if none",
+        "recurring_lines": [
+          {
+            "quote": "the line word-for-word as it appears — copy it VERBATIM from the audio (or the on-screen text), never paraphrase",
+            "where_used": "hook | verdict | sign-off | transition | throughout",
+            "medium": "spoken | text-overlay",
+            "pattern": "if the line contains an obviously-varying slot (a day/episode number, price, place), the templated form with a placeholder, e.g. 'Day {n} of eating at every taco truck in Austin'; else null",
+            "position": "opening | mid | closing — where in the video it occurs",
+            "delivery_note": "one short phrase on how it's delivered (shouted at camera, whispered over b-roll, bold yellow caption)",
+            "likely_habit": number
+          }
+        ]
+      },
+
+      "habit_candidates": [
+        {
+          "label": "a 2-5 word name for a repeatable editing habit, in THIS creator's terms",
+          "detail": "one sentence: what it is and when they do it",
+          "kind": "selection | verbal | supplied-footage | visual-effect",
+          "likely_habit": number,
+          "times_seen_in_video": number
+        }
+      ],
+
+      "reveal_script": [
+        "3-5 short lines, each one sentence, written in SECOND PERSON directly to the creator, telling them what you noticed about how they edit — like a friend who just binged their videos. Quote their own words back at them in quotes. Be specific to THIS video, never generic."
+      ],
 
       "signature_moves": [
         {
@@ -207,6 +246,16 @@ enum GeminiPrompt {
     - arc: an ordered list of short labels capturing the ACTUAL sequence of THIS video's sections in the creator's own pattern — not a generic template.
 
     - sections: break the video into exactly three sections — "intro", "middle", "end". For EACH, give a one-phrase "purpose" and a "beats" list naming the specific, repeatable beats THIS creator actually includes, as SHORT generalized labels (2-4 words, like chips: "introduce restaurant", "food close-up hook", "first-bite reaction", "verdict / rating"). Give each beat a rough "time_hint" range. Observe only what they ACTUALLY do in THIS video — do not pad with generic beats they didn't include. This is the structure another system will recreate on new raw footage, so be concrete and faithful.
+
+    - beat labels must be FORMAT-LEVEL and reusable — a label that would apply to ANY future video in this format ("taste each item one at a time", "give the price before the first bite") — NEVER tied to this video's specific dishes, places, or menu items. Put the video-specific instance in the beat's "example" field instead (label: "taste each item one at a time", example: "chicken skin, then the thigh"). If you catch yourself writing a dish or restaurant name in a label, generalize the label and move the name into "example".
+
+    - verbal_style and recurring_lines: this creator's VERBAL identity — catchphrases, rating formulas, sign-offs, the way they open. Quote VERBATIM; if two people speak, capture the exchange pattern in tone/pov. Only include lines that feel like a repeatable FORMULA (addressed to the audience, a scoring phrase, a sign-off) — not ordinary sentences about this meal. 0-4 recurring_lines. You have seen ONE video: likely_habit is your confidence the line is a recurring formula rather than a one-off. Recurring ON-SCREEN TEXT formats — a written hook pattern ("$1 vs $100 sushi"), a price/location card, a written rating card — are recurring_lines with medium "text-overlay"; capture the format with placeholders in "pattern". A rating delivered per dish mid-video is where_used "throughout" (it lives with its dish), never "verdict" — only the single final judgement is "verdict".
+
+    - habit_candidates: 3-6 items, ordered MOST-DISTINCTIVE-FIRST (the first item should be the single habit that makes this creator most recognizable). These become toggles the creator confirms, so each label must make sense to THEM out of context. times_seen_in_video = how many times the habit actually occurs in THIS video (real evidence, not a guess). For "kind": selection = an editor applies it purely by choosing/ordering/trimming existing clips (e.g. "price before the first bite", "never shows their face until the verdict"); verbal = a spoken-line habit (e.g. "opens with a question to camera"); supplied-footage = needs special material the creator brings (e.g. "opens with a montage of other creators' clips"); visual-effect = zooms, speed ramps, split-screens, transitions, OR anything needing music, sound-sync, or audio mixing (e.g. "cuts on the beat of the sound"). A crunch/ambient-sound habit achievable by clip choice ("keep bite shots uncovered so the crunch plays") is selection. If you are torn between selection and any other kind, choose selection — an editor honoring it with clip choice is better than losing it. At least 2 habit_candidates must be kind selection or verbal — every creator has pacing/ordering habits even when their surface identity is effects.
+
+    - reveal_script: second person ("you"), present tense, specific, warm but not sycophantic. Never claim "always" or "every video" from one video — say "in this video" or "you have a habit of". Do not use the creator's name (you don't know it). At least one line must quote their own words back at them.
+
+    - hook.montage: a montage hook = several very short clips back-to-back before the creator's own material — often borrowed clips of OTHER creators reviewing the same place (social proof). If present: set is_montage, estimate clip count + average clip seconds, and say whether the clips are other creators' or the creator's own footage. If absent, is_montage is false and the other montage fields are 0/null.
 
     - signature_moves and anything_unusual: actively look for the idiosyncratic. These fields exist specifically so this creator's individuality is preserved and not averaged away. Only include things actually visible in this video.
 

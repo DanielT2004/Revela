@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The editor **shell** (the RECOMMENDED option from the "Navigation Options" mockup). It owns the
 /// chrome — a Home button, the project title, an Export button, and the persistent `StageSwitcher` —
@@ -11,9 +12,15 @@ import SwiftUI
 struct EditorShellView: View {
     @Environment(AppRouter.self) private var router
     @Environment(VideoSession.self) private var session
+    @Environment(ProjectService.self) private var projects
 
     /// Presented when the user taps Sort after they've already moved past it (frame 3).
     @State private var showResumeSheet = false
+
+    /// Inline rename state for the header title (mirrors ProfileView's serif field + ✓ flash).
+    @State private var titleDraft = ""
+    @FocusState private var titleFocused: Bool
+    @State private var savedFlash = false
 
     private var store: EditPlanStore? { session.store }
 
@@ -47,10 +54,29 @@ struct EditorShellView: View {
         HStack(spacing: 12) {
             HomeButton { router.home() }
             Spacer()
-            Text(projectTitle)
-                .font(VeFont.sans(14.5, weight: .semibold))
-                .foregroundStyle(Color.veWarmGray)
-                .lineLimit(1)
+            // Tap-to-rename title — the persisted project name (single source of truth), so this and the
+            // Home tile stay in sync. Commits on Done and on focus-loss; a ✓ flashes on save.
+            HStack(spacing: 5) {
+                TextField("Your cut", text: $titleDraft)
+                    .font(VeFont.sans(14.5, weight: .semibold))
+                    .foregroundStyle(titleFocused ? Color.veCharcoal : Color.veWarmGray)
+                    .multilineTextAlignment(.center)
+                    .textInputAutocapitalization(.words)
+                    .autocorrectionDisabled()
+                    .submitLabel(.done)
+                    .focused($titleFocused)
+                    .onSubmit(commitTitle)
+                    .fixedSize()
+                if savedFlash {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 13)).foregroundStyle(Color.veSage)
+                        .transition(.scale(scale: 0.4).combined(with: .opacity))
+                } else if !titleFocused {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 10, weight: .semibold)).foregroundStyle(Color.veFaintGray)
+                }
+            }
+            .frame(maxWidth: 190)
             Spacer()
             Button { router.go(.export) } label: {
                 Text("Export")
@@ -62,6 +88,24 @@ struct EditorShellView: View {
         }
         .padding(.horizontal, 18)
         .padding(.top, 54)
+        .onAppear { titleDraft = projects.name }
+        .onChange(of: titleFocused) { _, focused in if !focused { commitTitle() } }
+        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: savedFlash)
+    }
+
+    /// Commit the edited title. Empty or unchanged reverts to the stored name; a real rename persists it,
+    /// gives a light haptic, and flashes a ✓.
+    private func commitTitle() {
+        guard projects.rename(to: titleDraft, session: session) else {
+            titleDraft = projects.name
+            return
+        }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        savedFlash = true
+        Task {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            savedFlash = false
+        }
     }
 
     // MARK: - The active stage (only one mounted at a time → one AVPlayer)
@@ -109,11 +153,4 @@ struct EditorShellView: View {
         }
     }
 
-    /// A short friendly title from the AI summary (mirrors the derivation the views used in their headers).
-    private var projectTitle: String {
-        let s = (store?.plan.videoSummary ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !s.isEmpty else { return "Your cut" }
-        let words = s.split(separator: " ").prefix(3).joined(separator: " ")
-        return words.prefix(1).uppercased() + words.dropFirst()
-    }
 }

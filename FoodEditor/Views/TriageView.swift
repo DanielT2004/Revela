@@ -482,9 +482,11 @@ struct TriageView: View {
             .frame(width: 46, height: 46)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(seg.description.isEmpty ? seg.sceneType.label : seg.description)
-                    .font(VeFont.sans(13.5, weight: .semibold)).foregroundStyle(Color.veCharcoal).lineLimit(1)
+                    .font(VeFont.sans(13.5, weight: .semibold)).foregroundStyle(Color.veCharcoal)
+                    .fixedSize(horizontal: false, vertical: true)  // wrap the FULL AI description; row grows to fit
+                    .multilineTextAlignment(.leading)
                 Text("\(seg.sceneType.label) · \(Int((seg.endSeconds - seg.startSeconds).rounded()))s")
                     .font(VeFont.sans(11.5)).foregroundStyle(Color.veWarmGray)
             }

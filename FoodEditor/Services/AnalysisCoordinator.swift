@@ -2,6 +2,15 @@ import Foundation
 import Observation
 import UIKit
 
+/// A decodable but unusable Edit Plan — refused by `ship()`'s viability gate and routed through the
+/// normal `.failed` + Retry path (KNOWN_ISSUES #12).
+enum AnalysisViabilityError: LocalizedError {
+    case emptyPlan
+    var errorDescription: String? {
+        "Vela couldn't find usable moments in this footage — try again, or start over with different clips."
+    }
+}
+
 /// Owns the one-shot **merge + Gemini analysis** pipeline for a session. The pipeline used to live in
 /// `ProcessingView.run()`, where it was triggered by the view's `.task` — but a SwiftUI view's mount /
 /// remount lifecycle is fragile (RootView's `.id(router.screen)` recreates the view, resetting its
@@ -17,7 +26,8 @@ import UIKit
 ///   • the in-flight `Task` is held **here, not in the view**, so the analysis survives `ProcessingView`
 ///     disappearing — the user can navigate away or background the app mid-call and it still finishes
 ///     once and fires the completion notification.
-/// The only intentional re-trigger is the user tapping **Retry** on the error state (`retry(...)`).
+/// The only intentional re-triggers are the user tapping **Retry** on the error state (`retry(...)`)
+/// and **Cancel** on the working state (`cancel()`).
 @MainActor
 @Observable
 final class AnalysisCoordinator {
@@ -34,9 +44,18 @@ final class AnalysisCoordinator {
     enum Stage { case preparing, uploading, analyzing, finishing }
 
     private(set) var phase: Phase = .idle
-    private(set) var progress: Double = 0
+    private(set) var progress: Double = 0 {
+        didSet { lastProgressAt = Date(); if isSlow { isSlow = false } }   // any real movement clears "slow"
+    }
     private(set) var label = "Getting started"
     private(set) var rawResponse: String?
+
+    /// Upload-stall heuristic. The upload is opaque (URLSession gives no byte callbacks), so instead of a
+    /// real meter we flag "slow connection" when the *uploading* stage makes no progress for ~15s — honest
+    /// copy in place of a silently frozen arc.
+    private(set) var isSlow = false
+    private var lastProgressAt = Date()
+    private var stallTask: Task<Void, Never>?
 
     /// Current pipeline stage. `canCloseApp` is true once the work has moved to the server.
     private(set) var stage: Stage = .preparing
@@ -95,6 +114,26 @@ final class AnalysisCoordinator {
         launch(session: session, projects: projects, signature: Self.signature(for: session.clips), styleBlock: styleBlock, briefBlock: briefBlock, brollCoverageTarget: brollCoverageTarget)
     }
 
+    /// Creator-initiated stop (ProcessingView's quiet Cancel). Cancels the in-flight pipeline task, drops
+    /// the kill-recovery record, and returns to `.idle` — a later identical submission starts FRESH
+    /// (deliberately NOT re-attaching: a cancelled run must never silently resume with a stale brief).
+    /// An already-submitted server job simply runs out its clock; the reaper cleans it up.
+    func cancel() {
+        task?.cancel()
+        task = nil
+        stallTask?.cancel()
+        stallTask = nil
+        isSlow = false
+        AnalysisJobStore.clear()
+        signature = nil          // clears start()'s idempotency key so the same clips can run again
+        phase = .idle
+        progress = 0
+        label = "Getting started"
+        stage = .preparing
+        etaSeconds = nil
+        Log.gemini("Analysis cancelled by the creator — pending job record dropped.")
+    }
+
     // MARK: - Pipeline
 
     private func launch(session: VideoSession, projects: ProjectService, signature sig: String, styleBlock: String, briefBlock: String, brollCoverageTarget: Double) {
@@ -112,6 +151,25 @@ final class AnalysisCoordinator {
         smoothedEta = nil
         task = Task { [weak self] in
             await self?.runPipeline(session: session, projects: projects)
+        }
+        startStallWatch()
+    }
+
+    /// Watch for an upload stall (opaque upload → heuristic): flip `isSlow` once the uploading stage hasn't
+    /// advanced for ~15s. Self-terminates when the run leaves `.running`; also killed by `cancel()`.
+    private func startStallWatch() {
+        stallTask?.cancel()
+        lastProgressAt = Date()
+        isSlow = false
+        stallTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self else { return }
+                if self.phase != .running { self.isSlow = false; return }
+                if self.stage == .uploading, Date().timeIntervalSince(self.lastProgressAt) > 15 {
+                    self.isSlow = true
+                }
+            }
         }
     }
 
@@ -208,7 +266,13 @@ final class AnalysisCoordinator {
                 ? "Vela needs to stay open while it preps your footage. Tap Retry to try again."
                 : error.localizedDescription
             phase = .failed(message)
-            NotificationService.shared.notify(title: "Analysis hit a snag", body: message, screen: "analysis")
+            // KNOWN_ISSUES #9 — a server-job failure (.badRequest) already pushed "hit a snag" to any
+            // token-bearing device, so stay silent then. Client-side failures (compress / parse /
+            // viability) never reached the server and always ping locally. Mirrors the style coordinator.
+            let serverPushedFailure: Bool = { if let ge = error as? GeminiError, case .badRequest = ge { return true }; return false }()
+            if !serverPushedFailure || NotificationService.shared.deviceTokenHex == nil {
+                NotificationService.shared.notify(title: "Analysis hit a snag", body: message, screen: "analysis")
+            }
         }
     }
 
@@ -281,7 +345,15 @@ final class AnalysisCoordinator {
                                          aiValidation: aiValidation, repairActions: repairActions)
         }
 
-        session.store = EditPlanStore(plan: plan, brollCoverageTarget: brollCoverageTarget, spineIsVerbatim: spineIsVerbatim)
+        let store = EditPlanStore(plan: plan, brollCoverageTarget: brollCoverageTarget, spineIsVerbatim: spineIsVerbatim)
+        // KNOWN_ISSUES #12 — a degenerate plan (no segments, or an empty resolved spine) must fail loudly
+        // into the normal .failed + Retry path, never ship as a silent empty cut. `store.order` is the
+        // resolved spine on BOTH pipeline paths, so this also covers "decodes fine but keeps nothing".
+        guard !plan.segments.isEmpty, !store.order.isEmpty else {
+            Log.gemini("Viability gate — refusing to ship (segments: \(plan.segments.count), spine: \(store.order.count)).")
+            throw AnalysisViabilityError.emptyPlan
+        }
+        session.store = store
         rawResponse = rawForCapture
         progress = 1.0
         phase = .done
@@ -326,11 +398,12 @@ final class AnalysisCoordinator {
         AnalysisJobStore.clear()   // job done + project saved — drop the kill-recovery record + durable proxy
     }
 
-    /// DECIDE runs text-only via the proxy's SYNCHRONOUS `generate` op. Gemini 2.5 Pro finishes in ~40–60s
+    /// DECIDE runs text-only via the proxy's SYNCHRONOUS `generate` op. Gemini Pro finishes in ~40–60s
     /// (well under the ~150s edge wall-clock), so no async job / self-bail is needed. (Claude Sonnet + thinking
     /// scored a touch higher editorially but its ~150s runs time out on the free tier — parked in git history
-    /// for a future paid tier.)
-    private static let decideModel = "gemini-2.5-pro"
+    /// for a future paid tier.) Uses the `-latest` alias because Google retired the pinned `gemini-2.5-*`
+    /// IDs (2026-07); revisit pinning to a dated snapshot before public launch.
+    private static let decideModel = "gemini-pro-latest"
 
     /// The two-call tail: PERCEIVE content-index JSON → normalize → DECIDE (text-only) → ADAPT → `ship`.
     /// Shared by the live run and the kill-recovery resume. ADAPT produces the same `EditPlan` shape, so the
@@ -431,7 +504,11 @@ final class AnalysisCoordinator {
             Log.gemini("Resume error: \(error.localizedDescription)")
             AnalysisJobStore.clear()
             phase = .failed(error.localizedDescription)
-            NotificationService.shared.notify(title: "Analysis hit a snag", body: error.localizedDescription, screen: "analysis")
+            // Same two-condition gate as the live pipeline (KNOWN_ISSUES #9).
+            let serverPushedFailure: Bool = { if let ge = error as? GeminiError, case .badRequest = ge { return true }; return false }()
+            if !serverPushedFailure || NotificationService.shared.deviceTokenHex == nil {
+                NotificationService.shared.notify(title: "Analysis hit a snag", body: error.localizedDescription, screen: "analysis")
+            }
         }
     }
 

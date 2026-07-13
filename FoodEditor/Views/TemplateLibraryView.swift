@@ -1,36 +1,89 @@
 import SwiftUI
 import UIKit
 
-/// Screen 6 — the style library. Each card is a learned style; tap one to make it active. A dashed row
-/// starts a new template (create flow lands in M6).
+/// Screen 6 — the style library. Each card is a learned style; tap one to open its editor, tap "Use →"
+/// to make it active. Remove a template with the corner **×** or by swiping the card left to reveal a
+/// **Delete** affordance — both route through the same "are you sure?" confirmation. A dashed row on top
+/// starts a new template.
 struct TemplateLibraryView: View {
     @Environment(AppRouter.self) private var router
     @Environment(TemplateService.self) private var templates
 
+    @State private var pendingDelete: StyleTemplate?   // drives the "are you sure?" confirmation
+    @State private var showDeletedToast = false
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                BackChevronButton { router.back() }
+        ZStack(alignment: .bottom) {
+            // Native List so swipe-to-delete coexists with vertical scrolling (a raw DragGesture inside a
+            // ScrollView captured the scroll). The header + create row ride as one borderless row.
+            List {
+                VStack(alignment: .leading, spacing: 0) {
+                    BackChevronButton { router.back() }
 
-                Text("Your templates")
-                    .font(VeFont.serif(31)).foregroundStyle(Color.veCharcoal)
-                    .padding(.top, 22)
-                Text("Each one is a style Vela learned from a different set of videos. Tap one to make it active.")
-                    .font(VeFont.sans(14)).foregroundStyle(Color.veNoteText).lineSpacing(3)
-                    .padding(.top, 8)
+                    Text("Your templates")
+                        .font(VeFont.serif(31)).foregroundStyle(Color.veCharcoal)
+                        .padding(.top, 22)
+                    Text("Each one is a style Vela learned from a different set of videos. Tap one to make it active.")
+                        .font(VeFont.sans(14)).foregroundStyle(Color.veNoteText).lineSpacing(3)
+                        .padding(.top, 8)
 
-                createRow.padding(.top, 20)
+                    createRow.padding(.top, 20)
+                }
+                .padding(.horizontal, 22).padding(.top, 60).padding(.bottom, 10)
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
 
-                VStack(spacing: 12) {
-                    ForEach(templates.templates) { template in
-                        card(template)
+                ForEach(templates.templates) { template in
+                    TemplateRow(
+                        template: template,
+                        isActive: template.id == templates.activeId,
+                        poster: templates.poster(for: template.id),
+                        onTap: { openEditor(template) },
+                        onSetActive: { setActive(template) },
+                        onRequestDelete: { pendingDelete = template }
+                    )
+                    .listRowInsets(EdgeInsets(top: 6, leading: 22, bottom: 6, trailing: 22))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) { pendingDelete = template } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                        .tint(Color.veTerracotta)
                     }
                 }
-                .padding(.top, 16)
+
+                Color.clear.frame(height: 40)
+                    .listRowInsets(EdgeInsets()).listRowSeparator(.hidden).listRowBackground(Color.clear)
             }
-            .padding(.horizontal, 22).padding(.top, 60).padding(.bottom, 40)
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(Color.veCream.ignoresSafeArea())
+            .confirmationDialog(
+                "Delete this template?",
+                isPresented: Binding(get: { pendingDelete != nil },
+                                     set: { if !$0 { pendingDelete = nil } }),
+                titleVisibility: .visible,
+                presenting: pendingDelete
+            ) { template in
+                Button("Delete", role: .destructive) { performDelete(template) }
+                Button("Cancel", role: .cancel) { pendingDelete = nil }
+            } message: { template in
+                Text("“\(template.name)” will be permanently removed. This can’t be undone.")
+            }
+
+            if showDeletedToast {
+                ToastView(text: "Template deleted")
+                    .padding(.bottom, 30)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .task {
+                        try? await Task.sleep(nanoseconds: 1_800_000_000)
+                        withAnimation { showDeletedToast = false }
+                    }
+            }
         }
-        .background(Color.veCream.ignoresSafeArea())
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: showDeletedToast)
     }
 
     private var createRow: some View {
@@ -58,11 +111,48 @@ struct TemplateLibraryView: View {
         .buttonStyle(.plain)
     }
 
-    private func card(_ template: StyleTemplate) -> some View {
-        let isActive = template.id == templates.activeId
-        // Card body = tap to edit; the "Use →" pill is a SEPARATE button (no nested buttons → no gesture clash).
-        return HStack(alignment: .top, spacing: 13) {
-            thumbnail(template)
+    // MARK: actions
+
+    private func openEditor(_ template: StyleTemplate) {
+        templates.beginEditing(template)
+        router.go(.templateEditor)
+    }
+
+    private func setActive(_ template: StyleTemplate) {
+        guard template.id != templates.activeId else { return }
+        templates.setActive(template.id)
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
+
+    private func performDelete(_ template: StyleTemplate) {
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)  // destructive haptic
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+            templates.delete(template.id)                                 // removes the folder on disk + heals active id
+        }
+        pendingDelete = nil
+        withAnimation { showDeletedToast = true }
+    }
+}
+
+/// One template card. Tap opens the editor; swipe left (native `.swipeActions` on the parent List) reveals
+/// Delete, and a corner **×** removes it directly — both ask the parent to confirm. Mirrors Home's `ProjectRow`.
+private struct TemplateRow: View {
+    let template: StyleTemplate
+    let isActive: Bool
+    let poster: UIImage?
+    let onTap: () -> Void
+    let onSetActive: () -> Void
+    let onRequestDelete: () -> Void
+
+    var body: some View {
+        cardBody
+    }
+
+    // MARK: card (the tile body)
+
+    private var cardBody: some View {
+        HStack(alignment: .top, spacing: 13) {
+            thumbnail
             VStack(alignment: .leading, spacing: 0) {
                 Text(template.name)
                     .font(VeFont.sans(15.5, weight: .bold)).foregroundStyle(Color.veCharcoal).lineLimit(1)
@@ -84,14 +174,31 @@ struct TemplateLibraryView: View {
         .background(Color.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
             .strokeBorder(Color.veTerracotta, lineWidth: isActive ? 2 : 0))
-        .overlay(alignment: .topTrailing) { badge(isActive, template) }
+        .overlay(alignment: .topTrailing) { badge }
+        .overlay(alignment: .topLeading) { deleteXButton }
         .shadow(color: Color.veCharcoal.opacity(0.06), radius: 12, y: 4)
         .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .onTapGesture { openEditor(template) }
+        .onTapGesture { onTap() }
+    }
+
+    /// Small always-visible remove affordance in the top-leading corner. Frosted white circle so the ×
+    /// stays legible over any thumbnail; routes through the same confirmation as the swipe.
+    private var deleteXButton: some View {
+        Button { onRequestDelete() } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 10, weight: .heavy))
+                .foregroundStyle(Color.veCharcoal)
+                .frame(width: 22, height: 22)
+                .background(.white, in: Circle())
+                .shadow(color: Color.veCharcoal.opacity(0.2), radius: 3, y: 1)
+        }
+        .buttonStyle(.plain)
+        .padding(7)
+        .accessibilityLabel("Delete template")
     }
 
     @ViewBuilder
-    private func badge(_ isActive: Bool, _ template: StyleTemplate) -> some View {
+    private var badge: some View {
         if isActive {
             HStack(spacing: 5) {
                 Circle().fill(.white).frame(width: 5, height: 5)
@@ -101,7 +208,7 @@ struct TemplateLibraryView: View {
             .background(Color.veSage, in: Capsule())
             .padding(12)
         } else {
-            Button { setActive(template) } label: {
+            Button { onSetActive() } label: {
                 Text("Use →")
                     .font(VeFont.sans(11.5, weight: .bold)).foregroundStyle(Color.veTerracotta)
                     .padding(.horizontal, 10).padding(.vertical, 5)
@@ -113,9 +220,9 @@ struct TemplateLibraryView: View {
     }
 
     @ViewBuilder
-    private func thumbnail(_ template: StyleTemplate) -> some View {
+    private var thumbnail: some View {
         Group {
-            if let poster = templates.poster(for: template.id) {
+            if let poster {
                 Image(uiImage: poster).resizable().scaledToFill()
             } else {
                 miniGrid(template.tones)
@@ -135,21 +242,10 @@ struct TemplateLibraryView: View {
         .frame(width: 62, height: 82)
     }
 
-    private func openEditor(_ template: StyleTemplate) {
-        templates.beginEditing(template)
-        router.go(.templateEditor)
-    }
-
     private func chip(_ text: String) -> some View {
         Text(text)
             .font(VeFont.sans(11, weight: .bold)).foregroundStyle(Color.veTerracotta)
             .padding(.horizontal, 8).padding(.vertical, 3)
             .background(Color.veTerracotta.opacity(0.1), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-    }
-
-    private func setActive(_ template: StyleTemplate) {
-        guard template.id != templates.activeId else { return }
-        templates.setActive(template.id)
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
 }

@@ -95,10 +95,15 @@ enum EditPlanAssembler {
             let entry = (asset: a, track: t, duration: d); isoCache[url] = entry; return entry
         }
 
+        // The voiceover duck envelope — same shared helper as the preview, so the export mix matches.
+        let narrationPieces = store.narrationPieces()
+        let duck = AudioDucking.duckIntervals(for: narrationPieces)
+
         /// Build one audio track (base or overlay) from clip pieces, with gaps + speed scaling, and
-        /// register its per-clip volume on the audio mix. When `isolated` is true (base track only), a
-        /// piece fully covered by a cleaned-voice span reads that file instead of the originals — same
-        /// coverage test as the preview, so what you hear is what you export.
+        /// register its volume envelope (per-clip volume × voiceover duck × track-mute) on the audio
+        /// mix. When `isolated` is true (base track only), a piece fully covered by a cleaned-voice
+        /// span reads that file instead of the originals — same coverage test as the preview, so what
+        /// you hear is what you export.
         func buildAudioTrack(_ pieces: [AudioPiece], isolated: Bool) async {
             guard !pieces.isEmpty,
                   let aTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
@@ -144,11 +149,8 @@ enum EditPlanAssembler {
             }
             let params = AVMutableAudioMixInputParameters(track: aTrack)
             params.audioTimePitchAlgorithm = .spectral
-            var prev: Float = -1
-            for p in sorted where p.volume != prev {
-                params.setVolume(p.volume, at: CMTime(seconds: p.baseStart, preferredTimescale: 600))
-                prev = p.volume
-            }
+            AudioDucking.apply(to: params, pieces: sorted, duck: duck, level: store.voDuckLevel,
+                               active: !store.originalAudioMuted)
             mixParams.append(params)
         }
 
@@ -211,6 +213,56 @@ enum EditPlanAssembler {
         // ---- AUDIO: base voice + un-muted overlay, mixed per-clip volume ----
         await buildAudioTrack(store.baseAudioPieces(), isolated: store.useIsolatedAudio)
         await buildAudioTrack(store.overlayAudioPieces(), isolated: false)
+
+        // ---- NARRATION: recorded voiceover takes (timeline-time files — no proxy mapping, no speed) ----
+        // Mirrors PolishComposition's narration block (lockstep), and runs BEFORE the tail-extension
+        // check below so a take that outruns the video is covered by the freeze-frame. Independent of
+        // `ExportSourceResolver` — the m4a files are local, so a proxy-fallback export still gets them.
+        if !narrationPieces.isEmpty,
+           let nTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            var takeCache: [URL: (asset: AVURLAsset, track: AVAssetTrack, duration: Double)] = [:]
+            var trackEnd = CMTime.zero
+            var inserted = 0
+            for piece in narrationPieces.sorted(by: { $0.startOnBase < $1.startOnBase }) {
+                var entry = takeCache[piece.url]
+                if entry == nil {
+                    let a = AVURLAsset(url: piece.url)
+                    if let t = try? await a.loadTracks(withMediaType: .audio).first {
+                        let d = (try? await a.load(.duration).seconds) ?? .greatestFiniteMagnitude
+                        entry = (asset: a, track: t, duration: d); takeCache[piece.url] = entry
+                    }
+                }
+                guard let take = entry else {
+                    Log.audio("⚠️ export: narration take unreadable: \(piece.url.lastPathComponent) — skipped.")
+                    continue
+                }
+                let at = CMTime(seconds: piece.startOnBase, preferredTimescale: 600)
+                if CMTimeCompare(at, trackEnd) > 0 {
+                    nTrack.insertEmptyTimeRange(CMTimeRange(start: trackEnd, end: at))
+                }
+                let lo = max(0, piece.fileIn)
+                let hi = min(piece.fileOut, take.duration)
+                guard hi > lo + 0.02 else { continue }
+                let r = CMTimeRange(start: CMTime(seconds: lo, preferredTimescale: 600),
+                                    end: CMTime(seconds: hi, preferredTimescale: 600))
+                do {
+                    try nTrack.insertTimeRange(r, of: take.track, at: at)
+                    inserted += 1
+                } catch {
+                    Log.audio("⚠️ export: narration insert failed @\(String(format: "%.1f", at.seconds))s: \(error.localizedDescription)")
+                }
+                trackEnd = CMTime(seconds: piece.startOnBase + (hi - lo), preferredTimescale: 600)
+            }
+            if inserted > 0 {
+                let params = AVMutableAudioMixInputParameters(track: nTrack)
+                params.audioTimePitchAlgorithm = .spectral
+                for piece in narrationPieces.sorted(by: { $0.startOnBase < $1.startOnBase }) {
+                    params.setVolume(piece.volume, at: CMTime(seconds: piece.startOnBase, preferredTimescale: 600))
+                }
+                mixParams.append(params)
+            }
+            Log.audio("🎧 export: \(inserted)/\(narrationPieces.count) narration take(s) inserted, track dur=\(String(format: "%.1f", CMTimeGetSeconds(nTrack.timeRange.duration)))s.")
+        }
 
         // Drop any degenerate (zero/negative-length) instruction — AVFoundation rejects the WHOLE
         // video composition ("Operation Stopped") if even one slips in.

@@ -60,7 +60,7 @@ final class GeminiService: VideoAnalyzing {
 
     /// The analysis model. Exposed statically so the eval-capture layer can record it in `meta.json`
     /// without reaching into a private field.
-    static let modelID = "gemini-2.5-flash"
+    static let modelID = "gemini-flash-latest"
 
     /// Hard ceiling on output tokens. `gemini-2.5-flash` tops out at 65,536; we now set it **explicitly**
     /// so the long-video case gets maximum headroom and the JSON can't silently truncate. Two reasons it
@@ -90,6 +90,18 @@ final class GeminiService: VideoAnalyzing {
         cfg.timeoutIntervalForRequest = 120
         cfg.timeoutIntervalForResource = 600   // video upload + a slow analysis can run long
         cfg.waitsForConnectivity = true
+        return URLSession(configuration: cfg)
+    }()
+
+    /// Fail-FAST session for the tiny proxy CONTROL calls (open-upload-session, job create, status poll,
+    /// file-ACTIVE poll). Unlike `session`, this does NOT wait for connectivity — an offline device surfaces
+    /// an error in ~20s instead of hanging up to 600s behind `waitsForConnectivity` (the onboarding-freeze
+    /// bug). The big Google byte-upload and the ~40s sync DECIDE stay on the patient `session`.
+    private lazy var quickSession: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 20
+        cfg.timeoutIntervalForResource = 45
+        cfg.waitsForConnectivity = false
         return URLSession(configuration: cfg)
     }()
 
@@ -186,7 +198,7 @@ final class GeminiService: VideoAnalyzing {
     }
 
     /// DECIDE — a TEXT-ONLY `generateContent` (no video) via the proxy's SYNCHRONOUS `generate` op. The editor
-    /// step of the two-call pipeline; `model` is `gemini-2.5-pro` (text-only, so it's cheap). The proxy's
+    /// step of the two-call pipeline; `model` is `gemini-pro-latest` (text-only, so it's cheap). The proxy's
     /// `generate` op needs no `fileUri`, so this requires ZERO edge-function change.
     func decide(prompt: String, schema: [String: Any]?, model: String, thinkingBudget: Int? = nil) async throws -> String {
         let cfg = try proxyConfig()
@@ -204,28 +216,50 @@ final class GeminiService: VideoAnalyzing {
         return try Self.extractText(from: data)
     }
 
-    /// Kick off the server-side **style-extraction** job — same runner, but with NO response schema
-    /// (matches the on-device `rawStyleTemplateJSON`; `StyleProfileRaw` decodes defensively). `notifyOnFinish`
-    /// is FALSE — style learning isn't the user-facing edit, so it must never push "cut is ready" (it posts its
-    /// own "style is ready" locally).
+    /// Kick off the server-side **style-extraction** job — same runner. `schema` carries the extraction
+    /// responseSchema (constrained decoding — lab-validated to double recurring-line recall vs schema-less;
+    /// `StyleProfileRaw` still decodes defensively either way). `notifyOnFinish` is TRUE with
+    /// `notifyKind: "style"` so the SAME server worker pushes "Your style is ready ✨" (screen: template)
+    /// when the job finishes while the app is closed — the exact APNs path the edit job uses, just
+    /// different copy. `batchId`/`batchSize` group a multi-video learn's sibling jobs so the server
+    /// pushes ONCE when the LAST one finishes, not once per video (see gemini-proxy's batch latch).
+    /// The client stays silent unless it has no token (see `StyleAnalysisCoordinator`).
     func startStyleExtractionJob(fileURI: String, fileName: String, mimeType: String,
-                                 prompt: String, model: String? = nil) async throws -> String {
+                                 prompt: String, schema: [String: Any]? = nil,
+                                 model: String? = nil,
+                                 batchId: String? = nil, batchSize: Int? = nil,
+                                 batchIndex: Int? = nil, consolidation: [String: Any]? = nil) async throws -> String {
         try await startJob(fileURI: fileURI, fileName: fileName, mimeType: mimeType,
-                           prompt: prompt, schema: nil, model: model, notifyOnFinish: false)
+                           prompt: prompt, schema: schema, model: model, notifyOnFinish: true, notifyKind: "style",
+                           batchId: batchId, batchSize: batchSize,
+                           batchIndex: batchIndex, consolidation: consolidation)
     }
 
     /// Shared body: POST `analyze` with the assembled payload (prompt + optional schema), return the jobId.
     /// `notifyOnFinish` tells the server whether THIS job's completion is the finish (→ push "cut is ready").
-    /// True for the monolith edit-plan job; false for the two-call PERCEIVE call (DECIDE still follows) and
-    /// for style extraction (not a user-facing edit).
+    /// True for the monolith edit-plan job AND for style extraction (which sends `notifyKind: "style"` so the
+    /// worker pushes "Your style is ready ✨"); false only for the two-call PERCEIVE call (DECIDE still follows).
     private func startJob(fileURI: String, fileName: String, mimeType: String,
                           prompt: String, schema: [String: Any]?, model: String?,
-                          notifyOnFinish: Bool = true) async throws -> String {
+                          notifyOnFinish: Bool = true, notifyKind: String = "edit",
+                          batchId: String? = nil, batchSize: Int? = nil,
+                          batchIndex: Int? = nil, consolidation: [String: Any]? = nil) async throws -> String {
         let cfg = try proxyConfig()
         let payload = Self.generatePayload(fileURI: fileURI, mimeType: mimeType, prompt: prompt, schema: schema)
+        // `notifyKind` selects the server's push copy/screen: "style" → "Your style is ready ✨" (screen
+        // template), otherwise the edit copy. The server defaults to "edit" if omitted.
         var fields: [String: Any] = ["fileUri": fileURI, "fileName": fileName, "mimeType": mimeType,
                                      "payload": payload, "model": model ?? self.model,
-                                     "notifyOnFinish": notifyOnFinish]
+                                     "notifyOnFinish": notifyOnFinish, "notifyKind": notifyKind]
+        // Batch grouping (multi-video style learns): the server pushes once per BATCH — when the last
+        // sibling job reaches a terminal state — instead of once per job. Omitted → per-job behavior.
+        if let batchId { fields["batchId"] = batchId }
+        if let batchSize { fields["batchSize"] = batchSize }
+        // Chained consolidation: this job's slot in the batch + the client-authored merge request the
+        // server runs when the LAST sibling lands (see StyleConsolidator.consolidationSpec) — moving the
+        // final model call server-side so the "ready" push fires when the template is genuinely built.
+        if let batchIndex { fields["batchIndex"] = batchIndex }
+        if let consolidation { fields["consolidation"] = consolidation }
         // Attach the APNs token so the server can push when the job finishes while the app is closed.
         // Omitted when not yet registered (perms denied / pre-Push-capability) → server skips the push.
         // The env must match the `aps-environment` entitlement: development (sandbox) for dev builds.
@@ -236,7 +270,7 @@ final class GeminiService: VideoAnalyzing {
         fields["apnsEnv"] = "production"
         #endif
         let req = try proxyRequest(cfg, op: "analyze", fields: fields)
-        let (data, resp) = try await session.data(for: req)
+        let (data, resp) = try await quickSession.data(for: req)   // small control call — fail fast when offline
         guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
             throw GeminiError.http((resp as? HTTPURLResponse)?.statusCode ?? -1, String(data: data, encoding: .utf8) ?? "")
         }
@@ -251,9 +285,14 @@ final class GeminiService: VideoAnalyzing {
     func jobStatus(jobId: String) async throws -> JobState {
         let cfg = try proxyConfig()
         let req = try proxyRequest(cfg, op: "status", fields: ["jobId": jobId])
-        let (data, resp) = try await session.data(for: req)
-        guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
-            throw GeminiError.http((resp as? HTTPURLResponse)?.statusCode ?? -1, String(data: data, encoding: .utf8) ?? "")
+        let (data, resp) = try await quickSession.data(for: req)   // small control call — fail fast when offline
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+        // A 404 now means the job genuinely doesn't exist (the proxy answers 503 for a transient DB error).
+        // Treat it as terminal via `.badRequest` so the poll loop stops instead of retrying a ghost for the
+        // full 300s and then reporting a misleading "timed out" (KNOWN_ISSUES #11).
+        if code == 404 { throw GeminiError.badRequest("That analysis job is no longer available — it may have expired. Start a new edit.") }
+        guard code == 200 else {
+            throw GeminiError.http(code, String(data: data, encoding: .utf8) ?? "")   // 503 etc. → retryable blip
         }
         let s = try JSONDecoder().decode(JobStatus.self, from: data)
         switch s.status {
@@ -262,6 +301,18 @@ final class GeminiService: VideoAnalyzing {
         case "generating": return .active("Almost ready")
         default:           return .active("Analyzing on the server")
         }
+    }
+
+    /// The server-chained consolidation job for a batched style learn, once the batch-latch winner has
+    /// stamped it on the sibling rows (nil until then, on pre-chain servers, and for N=1 learns — the
+    /// caller just falls back to the on-device merge). Best-effort by design: any error reads as nil.
+    func consolidationJobId(forJob jobId: String) async -> String? {
+        guard let cfg = try? proxyConfig(),
+              let req = try? proxyRequest(cfg, op: "status", fields: ["jobId": jobId]),
+              let (data, resp) = try? await quickSession.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let s = try? JSONDecoder().decode(JobStatus.self, from: data) else { return nil }
+        return s.consolidationJobId
     }
 
     /// Polls a server job to completion. The work runs server-side, so a dropped poll (e.g. a suspend
@@ -340,7 +391,7 @@ final class GeminiService: VideoAnalyzing {
         // 1a. Ask the proxy to open a resumable upload session (the Gemini key is injected server-side).
         let start = try proxyRequest(cfg, op: "start",
                                      fields: ["numBytes": numBytes, "mimeType": mimeType, "displayName": "vela-merged"])
-        let (startData, startResp) = try await session.data(for: start)
+        let (startData, startResp) = try await quickSession.data(for: start)   // small control call — fail fast when offline
         let startHTTP = startResp as? HTTPURLResponse
         guard startHTTP?.statusCode == 200 else {
             throw GeminiError.http(startHTTP?.statusCode ?? -1, String(data: startData, encoding: .utf8) ?? "")
@@ -379,7 +430,7 @@ final class GeminiService: VideoAnalyzing {
             attempt += 1
             try await Task.sleep(nanoseconds: 2_000_000_000)
             let poll = try proxyRequest(cfg, op: "poll", fields: ["name": file.name])
-            let (data, resp) = try await session.data(for: poll)
+            let (data, resp) = try await quickSession.data(for: poll)   // small control call — fail fast when offline
             guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
                 throw GeminiError.http((resp as? HTTPURLResponse)?.statusCode ?? -1, String(data: data, encoding: .utf8) ?? "")
             }
@@ -567,7 +618,11 @@ private struct UploadStartResponse: Decodable { let uploadUrl: String }
 private struct StartedJob: Decodable { let jobId: String }
 
 /// `{ status, result?, error? }` from the proxy's `status` op.
-private struct JobStatus: Decodable { let status: String; let result: String?; let error: String? }
+private struct JobStatus: Decodable {
+    let status: String; let result: String?; let error: String?
+    /// Batched style jobs: the server-chained consolidation job, once the batch latch winner stamped it.
+    let consolidationJobId: String?
+}
 
 private struct GenerateResponse: Decodable {
     struct Candidate: Decodable {

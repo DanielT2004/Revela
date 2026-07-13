@@ -15,6 +15,9 @@ struct PolishView: View {
     @Environment(VideoSession.self) private var session
     @Environment(ClipImportCoordinator.self) private var clipImport
     @Environment(VoiceIsolationCoordinator.self) private var voiceIso
+    @Environment(ProjectService.self) private var projects
+    @Environment(TemplateService.self) private var templates
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var showVideoPicker = false       // camera-roll picker for "Add videos"
     @State private var player = AVPlayer()
@@ -41,6 +44,11 @@ struct PolishView: View {
     @State private var splitFlashTask: Task<Void, Never>?
     @State private var voiceToast: (text: String, ok: Bool)?   // brief banner when isolation finishes/fails
     @State private var voiceToastTask: Task<Void, Never>?
+    @State private var narration = NarrationRecorder()        // voiceover take capture (page-scoped)
+    @State private var takeStart: Double?                      // playhead when the current take began
+    @State private var dragGain: Double?                       // duck-slider mid-drag value (commit on release)
+    @State private var narrationNudge: String?                 // one-shot "record a voiceover?" banner
+    @State private var narrationNudgeTask: Task<Void, Never>?
 
     @State private var pps: CGFloat = 14             // points per second (pinch-zoomable)
     @State private var zoomBasePps: CGFloat = 14
@@ -61,7 +69,7 @@ struct PolishView: View {
     private var store: EditPlanStore? { session.store }
     private var proxyURL: URL? { session.merged?.url }
 
-    enum Selection: Equatable { case base(UUID), overlay(UUID), text(UUID) }
+    enum Selection: Equatable { case base(UUID), overlay(UUID), text(UUID), narration(UUID) }
     private enum TextTab: String, CaseIterable, Identifiable { case keyboard = "Keyboard", font = "Font", style = "Style"; var id: String { rawValue } }
 
     /// Captured at the start of a canvas text move / resize / rotate so the gesture works off deltas.
@@ -72,7 +80,7 @@ struct PolishView: View {
                               var transientScale: Double = 1; var transientPanX: CGFloat = 0; var transientPanY: CGFloat = 0 }
     private let previewSpace = "preview"
     private let previewHeight: CGFloat = 264
-    private enum InspectorMode { case speed, volume, voice }
+    private enum InspectorMode { case speed, volume, voice, record }
     private enum SourcePicker: Identifiable {
         case add, swap(UUID)
         var id: String { switch self { case .add: return "add"; case .swap(let u): return "swap-\(u)" } }
@@ -108,6 +116,7 @@ struct PolishView: View {
     private let textH: CGFloat = 22
     private let mainH: CGFloat = 40
     private let brollH: CGFloat = 30
+    private let narrationH: CGFloat = 24
     private let audioH: CGFloat = 20
     /// Downward drag (dy) past which a lifted Main clip becomes a B-roll drop instead of a reorder.
     /// 30pt clears the Main lane (mainH/2 + trackGap) and enters the B-roll row.
@@ -132,7 +141,12 @@ struct PolishView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.veCream.ignoresSafeArea())
         .overlay { importProgressOverlay }
-        .overlay(alignment: .top) { voiceToastBanner }
+        .overlay(alignment: .top) {
+            VStack(spacing: 8) {
+                voiceToastBanner
+                narrationNudgeBanner
+            }
+        }
         .onChange(of: voiceIso.phase) { _, phase in
             switch phase {
             case .done:           showVoiceToast(text: "Clean voice ready", ok: true)
@@ -142,16 +156,34 @@ struct PolishView: View {
         }
         .task { await loadThumbnails() }
         .task(id: previewSignature) { await rebuildPreview() }
-        .onAppear(perform: addObserver)
+        .onAppear {
+            addObserver()
+            // One-shot: a resumed project whose take files vanished (lane persists names only).
+            if let store, store.prunedNarrationOnResume > 0 {
+                let n = store.prunedNarrationOnResume
+                store.prunedNarrationOnResume = 0
+                showVoiceToast(text: n == 1 ? "A voiceover file was missing and was removed."
+                                            : "\(n) voiceover files were missing and were removed.", ok: false)
+            }
+            maybeShowNarrationNudge()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { narration.stop() }       // backgrounding stops-and-keeps the take
+            else { narration.refreshMicPermission() }      // back from Settings → un-stick the mic hint
+        }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { _ in
+            if narration.isBusy { narration.stop(); return }   // the video's end ends the take — don't loop
             player.seek(to: .zero); scrollX = 0
             if previewPlaying && !fullscreen { player.play() }
         }
         .onDisappear(perform: teardown)
         .sheet(item: $sourcePicker) { picker in sourceSheet(picker) }
         .sheet(isPresented: $showVideoPicker) {
-            VideoPicker(preselectedIdentifiers: session.selectedAssetIdentifiers) { picked in
+            VideoPicker(preselectedIdentifiers: session.selectedAssetIdentifiers) { picked, failedCount in
                 showVideoPicker = false
+                if failedCount > 0 {
+                    showVoiceToast(text: "Couldn't load \(failedCount) video\(failedCount == 1 ? "" : "s") — check your connection.", ok: false)
+                }
                 guard !picked.isEmpty else { return }
                 store?.pushUndo()                                   // one undo step for the whole import
                 Task {
@@ -200,7 +232,7 @@ struct PolishView: View {
                             Image(systemName: "arrow.up.left.and.arrow.down.right")
                                 .font(.system(size: 12, weight: .bold)).foregroundStyle(.white.opacity(0.85))
                                 .frame(width: 30, height: 30).background(.black.opacity(0.3), in: Circle())
-                        }.buttonStyle(.plain)
+                        }.buttonStyle(.plain).disabled(narration.isBusy)
                     }
                 }
                 .padding(12)
@@ -215,6 +247,8 @@ struct PolishView: View {
                 textCanvas   // captions + the selected caption's move/resize/rotate gizmo
 
                 if let d = cropDrag { cropHUD(d) }   // "1.4×" reframe readout during a crop gesture
+
+                recordHUD   // 3-2-1 countdown digit + REC pill while a voiceover take is captured
             }
             .aspectRatio(9.0 / 16.0, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -264,6 +298,39 @@ struct PolishView: View {
                 .padding(.top, 12)
             Spacer()
         }.allowsHitTesting(false)
+    }
+
+    /// Voiceover capture feedback over the preview: a big serif countdown digit (springs in per tick),
+    /// then a REC pill with the elapsed timecode while the mic is live.
+    private var recordHUD: some View {
+        ZStack {
+            if case .countdown(let n) = narration.phase {
+                Text("\(n)")
+                    .font(VeFont.serif(64))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.45), radius: 12, y: 4)
+                    .id(n)   // new identity per digit → the transition replays each tick
+                    .transition(.scale(scale: 1.5).combined(with: .opacity))
+            } else if narration.phase == .recording {
+                VStack {
+                    HStack {
+                        HStack(spacing: 6) {
+                            Circle().fill(Color(hex: 0xC94F3D)).frame(width: 7, height: 7)
+                            Text("REC \(timecode(narration.elapsed))")
+                                .font(VeFont.mono(10, weight: .semibold)).foregroundStyle(.white)
+                        }
+                        .padding(.horizontal, 9).padding(.vertical, 5)
+                        .background(.black.opacity(0.45), in: Capsule())
+                        Spacer()
+                    }
+                    Spacer()
+                }
+                .padding(12)
+                .transition(.opacity)
+            }
+        }
+        .animation(.spring(response: 0.32, dampingFraction: 0.68), value: narration.phase)
+        .allowsHitTesting(false)
     }
 
     // MARK: - Per-clip crop gestures (reframe the selected Main clip in the 9:16 window)
@@ -411,10 +478,19 @@ struct PolishView: View {
                 VStack(alignment: .leading, spacing: trackGap) {
                     ruler(laneW)
                     laneRow(kind: .text, height: textH) { textLane(laneW) }
-                    laneRow(kind: .main, height: mainH) { mainLane(laneW) }
-                        .background(mainPromoteHighlight)
+                    // Main row: CapCut-style track-head mute lives in the gutter instead of a static icon.
+                    HStack(spacing: 0) {
+                        muteAllButton.frame(width: gutter, height: mainH)
+                        mainLane(laneW)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(height: mainH)
+                            .clipped()
+                    }
+                    .frame(height: mainH)
+                    .background(mainPromoteHighlight)
                     laneRow(kind: .broll, height: brollH) { brollLane(laneW) }
                         .background(brollDropHighlight)
+                    laneRow(kind: .narration, height: narrationH) { narrationLaneView(laneW) }   // VOICEOVER — recorded takes
                     laneRow(kind: .audio, height: audioH) { audioLaneContent(laneW) }   // AUDIO — cleaned-range bars
                         .opacity(dimTextAudio)
                 }
@@ -440,7 +516,12 @@ struct PolishView: View {
             .coordinateSpace(name: timelineSpace)
             .gesture(scrubGesture)
             .simultaneousGesture(zoomGesture)
-            .onTapGesture { if selection != nil { selection = nil; inspector = nil } }
+            .onTapGesture {
+                // Tapping empty timeline clears the selection AND any open inspector panel (the Record
+                // panel included — it used to strand itself when nothing was selected). Never mid-take.
+                guard !narration.isBusy else { return }
+                if selection != nil || inspector != nil { selection = nil; inspector = nil }
+            }
             .onAppear { laneWidth = laneW }
             .onChange(of: laneW) { _, n in laneWidth = n }
         }
@@ -469,11 +550,11 @@ struct PolishView: View {
             .overlay(Capsule().stroke(Color.veCharcoal.opacity(0.14), lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .disabled(clipImport.isBusy)
+        .disabled(clipImport.isBusy || narration.isBusy)
     }
 
     private var addBrollButton: some View {
-        Button { sourcePicker = .add } label: {
+        Button { guard !narration.isBusy else { return }; sourcePicker = .add } label: {
             HStack(spacing: 4) {
                 Image(systemName: "plus").font(.system(size: 10, weight: .bold))
                 Text("B-roll").font(VeFont.sans(10, weight: .bold))
@@ -584,6 +665,18 @@ struct PolishView: View {
                     .offset(x: xFor(displayStart(forOverlay: o), laneW), y: liftY(.overlay(o.id)))
                     .zIndex(isLifted(.overlay(o.id)) ? 10 : 1)
             }
+            // No footage to layer (e.g. a single talking-head clip) → tell the user the empty lane isn't
+            // broken and how to fill it. Pinned near the scroll origin so it's visible without scrolling.
+            if store?.hasNoBrollAvailable == true {
+                HStack(spacing: 5) {
+                    Image(systemName: "rectangle.stack.badge.plus").font(.system(size: 11))
+                    Text("No b-roll yet — tap “+ B-roll” to layer clips over your talking.")
+                        .font(VeFont.sans(10.5, weight: .medium)).lineLimit(2)
+                }
+                .foregroundStyle(Color.veFaintGray)
+                .frame(width: 210, alignment: .leading)
+                .padding(.leading, 8).padding(.top, 5)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -681,6 +774,81 @@ struct PolishView: View {
     private func tileLabel(_ seg: Segment?) -> String {
         guard let seg else { return "clip" }
         return seg.description.isEmpty ? seg.sceneType.label : seg.description
+    }
+
+    // MARK: - Voiceover track (recorded narration takes)
+
+    /// The VOICEOVER lane: sage waveform chips, one per take, plus a live terracotta ghost chip that
+    /// grows under the playhead while a take is being recorded. Chips select on tap, hold-lift to move
+    /// (horizontal only — takes never promote to other lanes), and edge-trim when selected.
+    private func narrationLaneView(_ laneW: CGFloat) -> some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(store?.narrationLane ?? []) { clip in
+                narrationChip(clip)
+                    .scaleEffect(isLifted(.narration(clip.id)) ? 1.08 : 1)
+                    .offset(x: xFor(displayStart(forNarration: clip), laneW))
+                    .zIndex(isLifted(.narration(clip.id)) ? 10 : 1)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
+            if narration.phase == .recording, let start = takeStart {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.veTerracotta.opacity(0.22))
+                    .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(Color.veTerracotta.opacity(0.55), lineWidth: 1))
+                    .frame(width: max(3, CGFloat(narration.elapsed) * pps), height: narrationH)
+                    .offset(x: xFor(start, laneW))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .animation(.spring(response: 0.35, dampingFraction: 0.75), value: store?.narrationLane)
+    }
+
+    private func narrationChip(_ clip: NarrationClip) -> some View {
+        let w = max(3, CGFloat(displayDur(forNarration: clip)) * pps)
+        let selected = selection == .narration(clip.id)
+        let muted = clip.volume <= 0.001
+        return ZStack(alignment: .bottomLeading) {
+            RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Color.veSage.opacity(0.18))
+            WaveformBar(color: Color.veSage.opacity(muted ? 0.22 : 0.62), seed: abs(clip.id.hashValue % 97) + 1)
+                .padding(.horizontal, 3).padding(.vertical, 3)
+            HStack(spacing: 3) {
+                if muted { Image(systemName: "speaker.slash.fill").font(.system(size: 7, weight: .bold)).foregroundStyle(Color.veSage) }
+                Text(String(format: "%.1fs", displayDur(forNarration: clip)))
+                    .font(VeFont.mono(7, weight: .semibold)).foregroundStyle(Color(hex: 0x50604A))
+            }
+            .padding(.leading, 4).padding(.bottom, 2)
+        }
+        .frame(width: w, height: narrationH)
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .stroke(selected ? Color.veTerracotta : Color.veSage.opacity(0.45), lineWidth: selected ? 2 : 1)
+        )
+        .overlay { if selected { RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(Color.veTerracotta.opacity(0.18), lineWidth: 3).padding(-2.5) } }
+        .overlay {
+            // "Will snap" cue: a lifted chip hovering over another take lands flush beside it on drop.
+            if isLifted(.narration(clip.id)) && liftedNarrationOverlaps {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .strokeBorder(Color.veTerracotta, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+            }
+        }
+        .overlay(alignment: .leading) { if selected { trimHandle(sel: .narration(clip.id), leftEdge: true, factor: 1, left: clip.startOnBase, right: clip.endOnBase, height: narrationH) } }
+        .overlay(alignment: .trailing) { if selected { trimHandle(sel: .narration(clip.id), leftEdge: false, factor: 1, left: clip.startOnBase, right: clip.endOnBase, height: narrationH) } }
+        .contentShape(Rectangle())
+        .onTapGesture { select(.narration(clip.id)) }
+        .opacity(dim(forNarration: clip.id))
+        .shadow(color: Color.veCharcoal.opacity(isLifted(.narration(clip.id)) ? 0.3 : 0),
+                radius: isLifted(.narration(clip.id)) ? 10 : 0, y: 5)
+        .simultaneousGesture(liftGesture(.narration(clip.id), baseStart: clip.startOnBase))
+    }
+
+    /// True while a lifted narration chip's proposed position overlaps another take (drives the dashed
+    /// stroke; the store snap resolves it on drop).
+    private var liftedNarrationOverlaps: Bool {
+        guard let l = lift, case .narration(let nid) = l.sel, let store,
+              let c = store.narrationLane.first(where: { $0.id == nid }) else { return false }
+        let s = displayStart(forNarration: c)
+        return store.narrationLane.contains { $0.id != nid && s < $0.endOnBase && $0.startOnBase < s + c.duration }
     }
 
     // MARK: - Text track (chips) + canvas gizmo
@@ -932,8 +1100,9 @@ struct PolishView: View {
             toolbarItem(.speed, "Speed", active: inspector == .speed) { openInspector(.speed) }
             toolbarItem(.text, "Text", active: isTextSelected) { addText() }
             toolbarItem(.volume, "Volume", active: inspector == .volume) { openInspector(.volume) }
+            toolbarItem(.record, "Voiceover", active: inspector == .record) { openRecordPanel() }
             toolbarItem(.cleanVoice, "Clean", active: inspector == .voice) {
-                guard store != nil else { return }
+                guard store != nil, !narration.isBusy else { return }
                 inspector = (inspector == .voice) ? nil : .voice
             }
             toolbarItem(.delete, "Delete", active: selection != nil) { deleteSelected() }
@@ -980,7 +1149,7 @@ struct PolishView: View {
             ZStack(alignment: .topLeading) {
                 ForEach(Array(store.order.enumerated()), id: \.element.id) { idx, clip in
                     let cleaned = store.useIsolatedAudio && isClipCleaned(clip)
-                    let muted = clip.clampedVolume <= 0.001
+                    let muted = clip.clampedVolume <= 0.001 || store.originalAudioMuted   // track-mute fades the whole lane
                     let tint = cleaned ? Color.veSage : Color.veTerracotta
                     let w = max(2, CGFloat(clip.timelineDuration) * pps - 2)
                     ZStack {
@@ -1004,7 +1173,7 @@ struct PolishView: View {
     private var scrubGesture: some Gesture {
         DragGesture(minimumDistance: 3)
             .onChanged { v in
-                if zooming || lifting { return }
+                if zooming || lifting || narration.isBusy { return }
                 if !scrubbing { scrubbing = true; scrubStartX = scrollX; previewPlaying = false; player.pause() }
                 scrollX = clampScroll(scrubStartX - v.translation.width)
                 seekPlayerOnly(to: playheadTime)
@@ -1016,6 +1185,7 @@ struct PolishView: View {
     private var zoomGesture: some Gesture {
         MagnificationGesture()
             .onChanged { scale in
+                if narration.isBusy { return }
                 if !zooming { zooming = true; zoomBasePps = pps; zoomAnchorTime = playheadTime }
                 pps = clampPps(zoomBasePps * scale)
                 scrollX = clampScroll(CGFloat(zoomAnchorTime) * pps)
@@ -1027,6 +1197,7 @@ struct PolishView: View {
     private func clampPps(_ v: CGFloat) -> CGFloat { max(8, min(v, 1320)) }
 
     private func togglePlay() {
+        guard !narration.isBusy else { return }
         previewPlaying.toggle()
         if previewPlaying {
             if playheadTime >= total - 0.05 { scrollX = 0; player.seek(to: .zero) }
@@ -1037,6 +1208,7 @@ struct PolishView: View {
     }
 
     private func step(by frames: Int) {
+        guard !narration.isBusy else { return }
         previewPlaying = false; player.pause()
         let snapped = (playheadTime * 30).rounded() / 30
         let t = max(0, min(snapped + Double(frames) * oneFrame, total))
@@ -1046,10 +1218,14 @@ struct PolishView: View {
     }
 
     private func select(_ sel: Selection) {
+        guard !narration.isBusy else { return }   // selection swaps the inspector away mid-take
         selection = (selection == sel) ? nil : sel
         if selection == nil { inspector = nil; editingText = nil }
         else if case .text(let tid) = selection { editingText = tid; textTab = .keyboard; textSessionPushed = false }
         else { editingText = nil }
+        // Picking a clip while the Voiceover panel is up → show THAT clip's volume, not the master
+        // (the master row showing 20% next to a clip was read as the clip's own level).
+        if selection != nil, inspector == .record { inspector = .volume }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
@@ -1057,10 +1233,20 @@ struct PolishView: View {
 
     /// Add a caption at the playhead, select it, and open the text editor.
     private func addText() {
-        guard let store, total > 0 else { return }
+        guard let store, total > 0, !narration.isBusy else { return }
         store.pushUndo()
         previewPlaying = false; player.pause()
         let id = store.addTextOverlay(at: playheadTime)
+        // Pre-seed the creator's WRITTEN signature on their first overlay: the learned text format
+        // (e.g. "CRAVING SCORE: __") lands ready to edit instead of "Tap to edit" — the reproduction
+        // rail for text-overlay signature lines (FirstCutView's style note points here).
+        if store.textOverlays.count == 1,
+           let sig = templates.active?.profile.verbalStyle.recurringLines.first(where: {
+               $0.medium == "text-overlay" && $0.confirmation != "out" && !$0.quote.isEmpty
+           }) {
+            let text = (sig.pattern?.isEmpty == false) ? sig.pattern! : sig.quote
+            store.updateTextOverlay(id) { $0.string = text }
+        }
         selection = .text(id); inspector = nil
         textTab = .keyboard; textSessionPushed = true   // the add already pushed undo
         editingText = id
@@ -1099,9 +1285,12 @@ struct PolishView: View {
         case .base(let cid):
             if d.leftEdge { store.setIn(cid, toSource: disp.lo) } else { store.setOut(cid, toSource: disp.hi) }
         case .overlay(let oid):
-            store.setOverlayBounds(oid, start: disp.lo, end: disp.hi)
+            if d.leftEdge { store.setOverlayLeftEdge(oid, toStart: disp.lo) }
+            else { store.setOverlayRightEdge(oid, toEnd: disp.hi) }
         case .text(let tid):
             store.setTextBounds(tid, start: disp.lo, end: disp.hi)
+        case .narration(let nid):
+            store.setNarrationBounds(nid, start: disp.lo, end: disp.hi)
         }
         trimDrag = nil; trimming = false
         if case .text = d.sel {} else { rebuildTick += 1 }   // text isn't in the render model — no rebuild
@@ -1119,14 +1308,37 @@ struct PolishView: View {
             if d.leftEdge { return (min(max(d.baseLeft + delta, s.startSeconds), d.baseRight - oneFrame), d.baseRight) }
             return (d.baseLeft, max(min(d.baseRight + delta, s.endSeconds), d.baseLeft + oneFrame))
         case .overlay(let oid):
-            guard let o = store.brollLane.first(where: { $0.id == oid }) else { return (d.baseLeft, d.baseRight) }
-            let srcLen = store.sourceLength(o.sourceSegmentId)
-            if d.leftEdge { return (min(max(d.baseLeft + delta, max(0, d.baseRight - srcLen)), d.baseRight - 0.3), d.baseRight) }
-            return (d.baseLeft, max(min(d.baseRight + delta, min(total, d.baseLeft + srcLen)), d.baseLeft + 0.3))
+            guard let o = store.brollLane.first(where: { $0.id == oid }), let seg = store.segment(o.sourceSegmentId)
+            else { return (d.baseLeft, d.baseRight) }
+            let inNow = store.overlaySourceStart(o)
+            let segStart = seg.startSeconds
+            let segEnd = segStart + store.sourceLength(o.sourceSegmentId)
+            // Left edge: advance the in-point (crop head). Can extend left only as far as unused source head.
+            if d.leftEdge {
+                let minStart = max(0, d.baseLeft - (inNow - segStart))
+                return (min(max(d.baseLeft + delta, minStart), d.baseRight - 0.3), d.baseRight)
+            }
+            // Right edge: fixed in-point, grow only to the available source tail.
+            let maxEnd = min(total, d.baseLeft + (segEnd - inNow))
+            return (d.baseLeft, max(min(d.baseRight + delta, maxEnd), d.baseLeft + 0.3))
         case .text:
             // captions can span any sub-range of the timeline (no source-length limit)
             if d.leftEdge { return (min(max(d.baseLeft + delta, 0), d.baseRight - 0.3), d.baseRight) }
             return (d.baseLeft, max(min(d.baseRight + delta, total), d.baseLeft + 0.3))
+        case .narration(let nid):
+            guard let c = store.narrationLane.first(where: { $0.id == nid }) else { return (d.baseLeft, d.baseRight) }
+            let others = store.narrationLane.filter { $0.id != nid }
+            let prevEnd = others.filter { $0.startOnBase < c.startOnBase }.map(\.endOnBase).max() ?? 0
+            let nextStart = others.filter { $0.startOnBase > c.startOnBase }.map(\.startOnBase).min() ?? total
+            if d.leftEdge {
+                // Left edge trims the file head (picture-sync) — it can re-extend left only as far as
+                // unused head exists, and never into the previous take.
+                let minStart = max(0, max(prevEnd, d.baseLeft - c.inPoint))
+                return (min(max(d.baseLeft + delta, minStart), d.baseRight - 0.3), d.baseRight)
+            }
+            // Right edge grows only to the file's remaining tail, the next take, or the video's end.
+            let maxEnd = min(min(nextStart, total), d.baseLeft + (c.fileDuration - c.inPoint))
+            return (d.baseLeft, max(min(d.baseRight + delta, maxEnd), d.baseLeft + 0.3))
         }
     }
 
@@ -1135,9 +1347,10 @@ struct PolishView: View {
     private func isLifted(_ sel: Selection) -> Bool { lift?.sel == sel }
     private func isTrimming(_ sel: Selection) -> Bool { trimDrag?.sel == sel }
     /// A Main clip lifted on the spine may move up (reorder hint) OR down (drop to B-roll); overlay/text
-    /// stay clamped to non-positive (up only).
+    /// stay clamped to non-positive (up only); narration is horizontal-only (takes never change lanes).
     private func liftY(_ sel: Selection) -> CGFloat {
         guard lift?.sel == sel else { return 0 }
+        if case .narration = sel { return 0 }
         if case .base = sel { return lift!.t.height }
         return min(0, lift!.t.height)
     }
@@ -1205,6 +1418,17 @@ struct PolishView: View {
     private func displayDur(forOverlay o: OverlayClip) -> Double {
         if let d = trimDrag, d.sel == .overlay(o.id) { let t = trimDisplay(d); return t.hi - t.lo }
         return o.duration
+    }
+    private func displayStart(forNarration c: NarrationClip) -> Double {
+        if let d = trimDrag, d.sel == .narration(c.id) { return trimDisplay(d).lo }
+        if let l = lift, l.sel == .narration(c.id) {
+            return max(0, min(c.startOnBase + Double((l.t.width + autoPanX) / pps), max(0, total - c.duration)))
+        }
+        return c.startOnBase
+    }
+    private func displayDur(forNarration c: NarrationClip) -> Double {
+        if let d = trimDrag, d.sel == .narration(c.id) { let t = trimDisplay(d); return t.hi - t.lo }
+        return c.duration
     }
     private func displayStart(forText o: TextOverlay) -> Double {
         if let d = trimDrag, d.sel == .text(o.id) { return trimDisplay(d).lo }
@@ -1281,7 +1505,7 @@ struct PolishView: View {
         LongPressGesture(minimumDuration: 0.3)
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(timelineSpace)))
             .onChanged { value in
-                guard case .second(true, let drag) = value else { return }
+                guard case .second(true, let drag) = value, !narration.isBusy else { return }
                 if lift == nil {
                     lift = LiftDrag(sel: sel, baseStart: baseStart)
                     autoPanX = 0
@@ -1331,12 +1555,34 @@ struct PolishView: View {
         case .text(let tid):
             let dur = store.textOverlays.first(where: { $0.id == tid })?.duration ?? 0
             store.moveTextOverlay(tid, toStart: max(0, min(l.baseStart + dragX, max(0, total - dur))))
+        case .narration(let nid):
+            if let c = store.narrationLane.first(where: { $0.id == nid }) {
+                // The store resolves any overlap by snapping flush beside the hit take (or reverting).
+                store.moveNarration(nid, toStart: max(0, min(l.baseStart + dragX, max(0, total - c.duration))))
+            }
         }
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 
     private func splitAtPlayhead() {
+        guard !narration.isBusy else { return }
         let t = playheadTime
+        // Split the SELECTED overlay/take when one is chosen (act on the highlighted clip, not the base
+        // beneath it); otherwise split the base spine under the playhead as before.
+        if case .overlay(let oid) = selection {
+            guard let rightId = store?.splitOverlay(oid, at: t) else { return }
+            selection = .overlay(rightId); rebuildTick += 1
+            UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+            showSplitFlash(at: t)
+            return
+        }
+        if case .narration(let nid) = selection {
+            guard let rightId = store?.splitNarration(nid, at: t) else { return }
+            selection = .narration(rightId); rebuildTick += 1
+            UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+            showSplitFlash(at: t)
+            return
+        }
         guard let rightId = store?.split(at: t) else { return }
         selection = .base(rightId); rebuildTick += 1
         UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
@@ -1358,6 +1604,7 @@ struct PolishView: View {
 
     /// Trim toolbar: select the clip under the playhead (or clear the current selection).
     private func trimAction() {
+        guard !narration.isBusy else { return }
         if selection != nil { selection = nil }
         else if let cid = clipUnderPlayhead() { select(.base(cid)) }
     }
@@ -1370,12 +1617,13 @@ struct PolishView: View {
     }
 
     private func deleteSelected() {
-        guard selection != nil else { return }
+        guard selection != nil, !narration.isBusy else { return }
         store?.pushUndo()
         switch selection {
         case .base(let cid): store?.deleteClip(cid)
         case .overlay(let oid): store?.removeOverlay(oid)
         case .text(let tid): store?.deleteTextOverlay(tid)
+        case .narration(let nid): store?.removeNarration(nid)
         case .none: return
         }
         selection = nil; inspector = nil; editingText = nil; rebuildTick += 1
@@ -1386,21 +1634,28 @@ struct PolishView: View {
         switch selection {
         case .none: return 1
         case .base(let s): return s == cid ? 1 : 0.5
-        case .overlay, .text: return 0.42
+        case .overlay, .text, .narration: return 0.42
         }
     }
     private func dim(forOverlay oid: UUID) -> Double {
         switch selection {
         case .none: return 1
         case .overlay(let s): return s == oid ? 1 : 0.5
-        case .base, .text: return 0.42
+        case .base, .text, .narration: return 0.42
         }
     }
     private func dim(forText tid: UUID) -> Double {
         switch selection {
         case .none: return 1
         case .text(let s): return s == tid ? 1 : 0.5
-        case .base, .overlay: return 0.42
+        case .base, .overlay, .narration: return 0.42
+        }
+    }
+    private func dim(forNarration nid: UUID) -> Double {
+        switch selection {
+        case .none: return 1
+        case .narration(let s): return s == nid ? 1 : 0.5
+        case .base, .overlay, .text: return 0.42
         }
     }
     private var dimTextAudio: Double { selection == nil ? 1 : 0.42 }
@@ -1418,6 +1673,9 @@ struct PolishView: View {
         case .text(let tid):
             guard let o = store?.textOverlays.first(where: { $0.id == tid }) else { return nil }
             return displayDur(forText: o)
+        case .narration(let nid):
+            guard let clip = store?.narrationLane.first(where: { $0.id == nid }) else { return nil }
+            return clip.duration
         case .none: return nil
         }
     }
@@ -1595,19 +1853,31 @@ struct PolishView: View {
     // MARK: - Undo / redo + Speed/Volume inspector (CP3.6)
 
     private func doUndo() {
+        guard !narration.isBusy else { return }
         store?.undo(); selection = nil; inspector = nil; rebuildTick += 1
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
     private func doRedo() {
+        guard !narration.isBusy else { return }
         store?.redo(); selection = nil; inspector = nil; rebuildTick += 1
     }
 
     /// Speed/Volume toolbar: open the inspector for the selected clip (or the clip under the playhead).
     private func openInspector(_ mode: InspectorMode) {
+        guard !narration.isBusy else { return }
         if case .text = selection { return }                       // text uses its own editor, not speed/volume
         if selection == nil, let cid = clipUnderPlayhead() { selection = .base(cid) }
         if mode == .speed, case .overlay = selection { return }   // speed is main-clip only
+        if mode == .speed, case .narration = selection { return } // narration is never speed-scaled
         inspector = (inspector == mode) ? nil : mode
+    }
+
+    /// Record toolbar: toggle the voiceover panel (master mixer + the record button). Clearing the
+    /// selection keeps the panel on the master controls rather than a clip's volume.
+    private func openRecordPanel() {
+        guard store != nil, !narration.isBusy else { return }
+        inspector = (inspector == .record) ? nil : .record
+        if inspector == .record { selection = nil; editingText = nil }
     }
 
     @ViewBuilder
@@ -1619,6 +1889,25 @@ struct PolishView: View {
                 .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .shadow(color: Color.veCharcoal.opacity(0.08), radius: 10, y: 4)
                 .padding(.horizontal, 16).padding(.top, 8)
+        } else if inspector == .record, let store {
+            recordInspector(store)
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .shadow(color: Color.veCharcoal.opacity(0.08), radius: 10, y: 4)
+                .padding(.horizontal, 16).padding(.top, 8)
+                .onAppear { narration.refreshMicPermission() }   // opening the panel shows fresh permission state
+                // Deliberate downward swipe on the panel dismisses it (in addition to ✕ / background
+                // tap / the toolbar toggle) — never mid-take, the Stop button lives here.
+                .gesture(
+                    DragGesture(minimumDistance: 14)
+                        .onEnded { v in
+                            guard !narration.isBusy else { return }
+                            if v.translation.height > 40, v.translation.height > abs(v.translation.width) {
+                                withAnimation(.easeOut(duration: 0.2)) { inspector = nil }
+                            }
+                        }
+                )
         } else if inspector != nil, let store, let sel = selection {
             VStack(alignment: .leading, spacing: 12) {
                 switch sel {
@@ -1630,6 +1919,7 @@ struct PolishView: View {
                                       onChange: { store.setClipVolume(cid, Float($0)) },
                                       onMute: { store.pushUndo(); store.setClipVolume(cid, clip.clampedVolume > 0 ? 0 : 1); rebuildTick += 1 },
                                       muted: clip.clampedVolume <= 0.001)
+                            mixHint(start: baseStart(clip), end: baseStart(clip) + clip.timelineDuration)
                         }
                         inspectorButton("Make B-roll", "square.on.square") {
                             store.pushUndo(); store.markBroll(clip.sourceSegmentId); selection = nil; inspector = nil; rebuildTick += 1
@@ -1641,6 +1931,7 @@ struct PolishView: View {
                                   onChange: { store.setOverlayVolume(oid, Float($0)) },
                                   onMute: { store.pushUndo(); store.setOverlayVolume(oid, o.volume > 0 ? 0 : 1); rebuildTick += 1 },
                                   muted: o.volume <= 0.001)
+                        mixHint(start: o.startOnBase, end: o.endOnBase)
                         HStack(spacing: 10) {
                             inspectorButton("Swap", "arrow.triangle.2.circlepath") { sourcePicker = .swap(oid) }
                             inspectorButton("To main", "arrow.down") {
@@ -1651,6 +1942,18 @@ struct PolishView: View {
                             inspectorButton("Remove", "trash", tint: Color.veTerracotta) {
                                 store.pushUndo(); store.removeOverlay(oid); selection = nil; inspector = nil; rebuildTick += 1
                             }
+                        }
+                    }
+                case .narration(let nid):
+                    if let clip = store.narrationLane.first(where: { $0.id == nid }) {
+                        volumeRow(value: Double(clip.volume),
+                                  onChange: { store.setNarrationVolume(nid, Float($0)) },
+                                  onMute: { store.pushUndo(); store.setNarrationVolume(nid, clip.volume > 0 ? 0 : 1); rebuildTick += 1 },
+                                  muted: clip.volume <= 0.001)
+                        inspectorButton("Remove take", "trash", tint: Color.veTerracotta) {
+                            store.pushUndo(); store.removeNarration(nid)
+                            selection = nil; inspector = nil; rebuildTick += 1
+                            UINotificationFeedbackGenerator().notificationOccurred(.warning)
                         }
                     }
                 case .text:
@@ -1807,6 +2110,285 @@ struct PolishView: View {
         .background(Color.veSurface, in: Capsule())
     }
 
+    // MARK: - Voiceover Record inspector + recording flow
+
+    /// The "Record" panel: a big record button (idle) or live level meter + Stop (recording), plus the
+    /// master "Original audio" mixer that ducks/mutes everything from the footage under the voiceover.
+    @ViewBuilder
+    private func recordInspector(_ store: EditPlanStore) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Voiceover").font(VeFont.sans(12, weight: .bold)).foregroundStyle(Color.veWarmGray)
+                Spacer()
+                if narration.phase == .recording {
+                    Text(timecode(narration.elapsed))
+                        .font(VeFont.mono(12, weight: .semibold)).foregroundStyle(Color.veTerracotta)
+                } else if !narration.isBusy {
+                    // ✕ close (mid-take the panel must stay — it holds the Stop button)
+                    Button { withAnimation(.easeOut(duration: 0.2)) { inspector = nil } } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .bold)).foregroundStyle(Color.veWarmGray)
+                            .frame(width: 26, height: 26)
+                            .background(Color.veSurface, in: Circle())
+                    }.buttonStyle(.plain)
+                }
+            }
+
+            if narration.micDenied {
+                ReasonNote(text: "Vela needs microphone access to record your voiceover. Enable it in Settings, then come back.")
+                inspectorButton("Open Settings", "gearshape.fill", tint: Color.veTerracotta) {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                }
+            } else if narration.isBusy {
+                HStack(spacing: 14) {
+                    levelMeter
+                    Spacer(minLength: 0)
+                    Button { narration.stop() } label: {
+                        HStack(spacing: 7) {
+                            RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                .fill(Color.veOnTerracotta).frame(width: 10, height: 10)
+                            Text(narration.phase == .recording ? "Stop" : "Cancel")
+                                .font(VeFont.sans(13, weight: .bold))
+                        }
+                        .foregroundStyle(Color.veOnTerracotta)
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .background(Color.veTerracotta, in: Capsule())
+                        .shadow(color: Color.veTerracotta.opacity(0.3), radius: 6, y: 3)
+                    }.buttonStyle(.plain)
+                }
+            } else {
+                HStack(spacing: 14) {
+                    recordButton(store)
+                    if store.canRecord(at: playheadTime) {
+                        Text("Records from the playhead — the video plays silently while you speak. Recording stops at the next take or the video's end.")
+                            .font(VeFont.sans(10)).foregroundStyle(Color.veNoteText)
+                    }
+                }
+                if !store.canRecord(at: playheadTime) {
+                    ReasonNote(text: total <= 0.1
+                               ? "Nothing on the timeline yet — add clips before recording a voiceover."
+                               : "The playhead is on a take (or too close to one). Scrub to open space, or delete the take.")
+                }
+            }
+
+            duckRow(store)
+        }
+    }
+
+    private func recordButton(_ store: EditPlanStore) -> some View {
+        let enabled = store.canRecord(at: playheadTime)
+        return Button(action: startRecording) {
+            HStack(spacing: 8) {
+                Image(systemName: "mic.fill").font(.system(size: 14, weight: .bold))
+                Text("Record").font(VeFont.sans(14, weight: .bold))
+            }
+            .foregroundStyle(Color.veOnTerracotta)
+            .padding(.horizontal, 18).padding(.vertical, 11)
+            .background(Color.veTerracotta, in: Capsule())
+            .shadow(color: Color.veTerracotta.opacity(0.35), radius: 8, y: 4)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+    }
+
+    /// Live mic-input meter: recent levels as terracotta bars, newest at the right. `pow(v, 0.5)`
+    /// perceptually lifts quiet speech so the meter visibly breathes at conversational volume.
+    private var levelMeter: some View {
+        Canvas { ctx, size in
+            let barW: CGFloat = 2.5, gap: CGFloat = 1.5
+            let step = barW + gap
+            let capacity = max(1, Int(size.width / step))
+            let recent = narration.levels.suffix(capacity)
+            var x = size.width - CGFloat(recent.count) * step
+            for v in recent {
+                let h = max(2, CGFloat(pow(Double(v), 0.5)) * size.height)
+                let rect = CGRect(x: x, y: (size.height - h) / 2, width: barW, height: h)
+                ctx.fill(Path(roundedRect: rect, cornerRadius: barW / 2), with: .color(Color.veTerracotta.opacity(0.85)))
+                x += step
+            }
+        }
+        .frame(width: 160, height: 34)
+    }
+
+    /// "Under voiceover": how loud the original bed (all footage audio) stays while a take plays — a
+    /// mix-time envelope scoped to the takes, never written into clip volumes. Commits like `volumeRow`
+    /// (undo on drag-begin, rebuild on release), with mid-drag values held in `dragGain` so the preview
+    /// signature only changes once.
+    private func duckRow(_ store: EditPlanStore) -> some View {
+        let shown = dragGain ?? Double(store.voDuckLevel)
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 10) {
+                Text("Under voiceover").font(VeFont.sans(11, weight: .semibold)).foregroundStyle(Color.veNoteText)
+                    .fixedSize()
+                Slider(value: Binding(get: { dragGain ?? Double(store.voDuckLevel) },
+                                      set: { dragGain = $0 }), in: 0...1) { editing in
+                    if editing {
+                        store.pushUndo()
+                        dragGain = Double(store.voDuckLevel)
+                    } else {
+                        if let g = dragGain { store.setVoDuckLevel(Float(g)) }
+                        dragGain = nil
+                        rebuildTick += 1
+                    }
+                }
+                .tint(Color.veTerracotta)
+                .disabled(narration.isBusy)
+                Text("\(Int(shown * 100))%").font(VeFont.sans(11, weight: .bold))
+                    .foregroundStyle(Color.veWarmGray).frame(width: 38, alignment: .trailing)
+            }
+            Text("How loud the original audio stays while your voiceover talks.")
+                .font(VeFont.sans(10)).foregroundStyle(Color.veNoteText)
+        }
+    }
+
+    /// CapCut-style track mute at the head of the Main lane: one tap silences ALL original footage
+    /// audio (base clips + audible B-roll) via a non-destructive flag — per-clip volumes stay
+    /// untouched, so unmuting returns the exact mix. The voiceover keeps playing.
+    private var muteAllButton: some View {
+        let muted = store?.originalAudioMuted ?? false
+        return Button {
+            guard let store, !narration.isBusy else { return }
+            store.pushUndo()
+            store.originalAudioMuted.toggle()
+            rebuildTick += 1
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        } label: {
+            Image(systemName: muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(muted ? Color.veTerracotta : Color.veFaintGray)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(narration.isBusy)
+    }
+
+    /// One-line mix transparency under a volume slider — why this clip can sound quieter than its
+    /// number says.
+    @ViewBuilder
+    private func mixHint(start: Double, end: Double) -> some View {
+        if let store {
+            if store.originalAudioMuted {
+                Text("Track is muted — tap the speaker by the Main lane.")
+                    .font(VeFont.sans(10)).foregroundStyle(Color.veNoteText)
+            } else if store.voDuckLevel < 0.999,
+                      store.narrationLane.contains(where: { $0.startOnBase < end && start < $0.endOnBase && $0.volume > 0.001 }) {
+                Text("Dips to \(Int(store.voDuckLevel * 100))% wherever your voiceover plays.")
+                    .font(VeFont.sans(10)).foregroundStyle(Color.veNoteText)
+            }
+        }
+    }
+
+    /// Kick off a take at the playhead: capture into the project's narration/ dir, mute the preview
+    /// while the mic is live (no speaker bleed), and land the chip on the lane when the take ends.
+    private func startRecording() {
+        guard let store, !narration.isBusy, store.canRecord(at: playheadTime) else { return }
+        let start = playheadTime
+        let boundary = store.narrationBoundary(after: start)
+        let dir = projects.narrationDirectory
+            ?? FileManager.default.temporaryDirectory.appendingPathComponent("narration", isDirectory: true)
+        if projects.narrationDirectory == nil {
+            Log.audio("⚠️ No current project — recording narration into a temp directory (won't survive relaunch).")
+        }
+        store.narrationDirectory = dir
+        selection = nil; editingText = nil
+        previewPlaying = false; player.pause()
+        takeStart = start
+        narration.start(into: dir, maxDuration: boundary - start,
+            onRecordingBegan: {
+                player.isMuted = true          // visual reference only — nothing for the mic to pick up
+                previewPlaying = true
+                player.play()
+            },
+            completion: { outcome in
+                handleTake(outcome, at: start, boundary: boundary)
+            })
+    }
+
+    private func handleTake(_ outcome: NarrationRecorder.Outcome, at start: Double, boundary: Double) {
+        player.pause()
+        player.isMuted = false
+        previewPlaying = false
+        takeStart = nil
+        switch outcome {
+        case .saved(let url, let duration):
+            guard let store else { return }
+            store.pushUndo()
+            let clip = store.addNarration(fileName: url.lastPathComponent, fileDuration: duration,
+                                          at: start, cappedTo: boundary)
+            selection = .narration(clip.id)
+            rebuildTick += 1
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            if store.noteFirstTake() {
+                showVoiceToast(text: "Original audio dips to \(Int(store.voDuckLevel * 100))% under your voiceover — fine-tune in Voiceover.", ok: true)
+            }
+        case .tooShort:
+            showVoiceToast(text: "That take was too short — record for at least half a second.", ok: false)
+        case .cancelled:
+            break
+        case .denied:
+            break   // the Record panel shows the Open-Settings hint via narration.micDenied
+        case .failed(let msg):
+            showVoiceToast(text: "Recording failed: \(msg)", ok: false)
+        }
+    }
+
+    // MARK: - Voiceover nudge (one-shot)
+
+    /// Show the "record a voiceover?" nudge once per session: when the brief planned a voiceover, or
+    /// the cut carries no talking-head content — and no take exists yet. Tap opens the Voiceover panel.
+    private func maybeShowNarrationNudge() {
+        guard !session.narrationNudgeShown, let store, store.baseDuration > 0,
+              store.narrationLane.isEmpty, !narration.isBusy else { return }
+        let plansVO = session.brief?.plansVoiceover == true
+        let noSpeech = !store.order.contains { store.segment($0.sourceSegmentId)?.sceneType == .talkingHead }
+        guard plansVO || noSpeech else { return }
+        session.narrationNudgeShown = true
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+            narrationNudge = plansVO ? "Ready for your voiceover — tap to record over the cut."
+                                     : "This cut has no talking — want to record a voiceover?"
+        }
+        narrationNudgeTask = Task {
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if Task.isCancelled { return }
+            await MainActor.run { withAnimation(.easeOut(duration: 0.25)) { narrationNudge = nil } }
+        }
+    }
+
+    private func dismissNarrationNudge() {
+        narrationNudgeTask?.cancel()
+        withAnimation(.easeOut(duration: 0.2)) { narrationNudge = nil }
+    }
+
+    /// Sage capsule under the toast slot — the voiceover discovery moment. Tap → the Voiceover panel.
+    @ViewBuilder private var narrationNudgeBanner: some View {
+        if let text = narrationNudge {
+            HStack(spacing: 8) {
+                Image(systemName: "mic.fill").font(.system(size: 13, weight: .bold))
+                Text(text).font(VeFont.sans(13, weight: .semibold)).lineLimit(2)
+                Button {
+                    dismissNarrationNudge()
+                } label: {
+                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).opacity(0.8)
+                        .frame(width: 22, height: 22).contentShape(Rectangle())
+                }.buttonStyle(.plain)
+            }
+            .foregroundStyle(Color.veOnTerracotta)
+            .padding(.leading, 16).padding(.trailing, 8).padding(.vertical, 11)
+            .background(Color.veSage, in: Capsule())
+            .shadow(color: Color.veCharcoal.opacity(0.2), radius: 10, y: 4)
+            .padding(.top, 10).padding(.horizontal, 20)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .onTapGesture {
+                dismissNarrationNudge()
+                inspector = .record
+                selection = nil; editingText = nil
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            }
+        }
+    }
+
     /// Transient banner shown when isolation finishes / fails — visible even if the inspector is closed.
     @ViewBuilder private var voiceToastBanner: some View {
         if let t = voiceToast {
@@ -1930,11 +2512,14 @@ struct PolishView: View {
         // NOTE: `useIsolatedAudio` is intentionally NOT here — toggling Original↔Cleaned swaps the
         // audioMix in place (no rebuild). Only the SET of cleaned files (filenames) rebuilds the preview.
         let iso = store.isolatedAudio.map { $0.url.lastPathComponent }.joined(separator: ",")
-        return base + "|" + lane + "|iso\(iso)|t\(rebuildTick)"
+        let nar = store.narrationLane.map {
+            "\($0.fileName):\(Int($0.startOnBase * 100))+\(Int($0.inPoint * 100))-\(Int($0.outPoint * 100))v\(Int($0.volume * 100))"
+        }.joined(separator: ",")
+        return base + "|" + lane + "|iso\(iso)|nar\(nar)|dk\(Int(store.voDuckLevel * 100))|m\(store.originalAudioMuted ? 1 : 0)|t\(rebuildTick)"
     }
 
     private func rebuildPreview() async {
-        guard !scrubbing, !trimming, !lifting, let store, let proxyURL else { return }
+        guard !scrubbing, !trimming, !lifting, !narration.isBusy, let store, let proxyURL else { return }
         let slots = store.renderSlots()
         let baseAudio = store.baseAudioPieces()
         let overlayAudio = store.overlayAudioPieces()
@@ -1942,7 +2527,10 @@ struct PolishView: View {
         guard let preview = await PolishComposition.makeItem(proxyURL: proxyURL, slots: slots,
                                                              baseAudio: baseAudio, overlayAudio: overlayAudio,
                                                              isolated: store.isolatedAudio,
-                                                             useIsolated: store.useIsolatedAudio) else { return }
+                                                             useIsolated: store.useIsolatedAudio,
+                                                             narration: store.narrationPieces(),
+                                                             duckLevel: store.voDuckLevel,
+                                                             originalMuted: store.originalAudioMuted) else { return }
         await MainActor.run {
             AudioSession.configureForPlayback()
             voicePreview = preview
@@ -1962,6 +2550,7 @@ struct PolishView: View {
     }
 
     private func teardown() {
+        narration.stop()   // leaving the page stops-and-keeps any in-flight take
         if let timeObserver { player.removeTimeObserver(timeObserver); self.timeObserver = nil }
         player.pause()
     }

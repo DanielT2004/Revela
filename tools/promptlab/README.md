@@ -46,4 +46,8 @@ duration_discipline (each 1–5, justifications must cite segment ids) · overal
 - `lib/validate.mjs` mirrors `FoodEditor/Models/EditPlanValidator.swift`
 - `schema.json` mirrors `GeminiService.responseSchema`
 - `prompts/baseline.txt` mirrors `GeminiPrompt.editPlan`
+- `prompts/style-v2.txt` mirrors `GeminiPrompt.styleProfile` — run-style-extract.mjs HARD-FAILS on drift (re-extract with the awk one-liner in git history)
+- `prompts/style-consolidate.txt` mirrors `StyleConsolidator.promptBody` — run-style-consolidate.mjs hard-fails on drift
+- `style-schema.json` mirrors `StyleConsolidator.extractionSchema` (the consolidation schema = same + `seen_in`) — no automated guard; if you touch one, touch both
+- `build-style-block.mjs` re-implements `StyleConstraintBuilder.block` — pinned by SHA-256; check-signatures.mjs hard-fails stale fixtures ("mirror out of date" → re-run style-fidelity-setup.mjs)
 If you change one side, update the other (the scores must stay comparable).

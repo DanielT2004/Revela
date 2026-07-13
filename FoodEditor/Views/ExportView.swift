@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import Photos
 import UIKit
 
 /// M8 — Export (screen S8). Assembles the edited plan into a real full-resolution 9:16 MP4 from the
@@ -10,7 +11,7 @@ struct ExportView: View {
     @Environment(ProjectService.self) private var projects
 
     private enum Phase: Equatable { case working, ready(URL), failed(String) }
-    private enum SaveState: Equatable { case idle, saving, saved, failed(String) }
+    private enum SaveState: Equatable { case idle, saving, saved, failed(String), denied }
 
     @State private var phase: Phase = .working
     @State private var progress: Double = 0
@@ -131,6 +132,7 @@ struct ExportView: View {
         }
         .padding(.horizontal, 22)
         .transition(.scale(scale: 0.96).combined(with: .opacity))
+        .onAppear { if let saved = store?.exportFeedback { feedback = saved } }   // re-opened export shows the prior verdict
     }
 
     /// "Did this feel like you?" — a soft learning signal (non-functional; real learning is // TODO).
@@ -159,7 +161,7 @@ struct ExportView: View {
         Button {
             withAnimation { feedback = up }
             UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-            Log.app("👍 Export feedback: \(up ? "loved it" : "not quite").")
+            projects.recordExportFeedback(up, session: session)   // durable — survives kill / re-open
         } label: {
             Image(systemName: up ? "hand.thumbsup" : "hand.thumbsdown")
                 .font(.system(size: 16, weight: .bold))
@@ -180,6 +182,14 @@ struct ExportView: View {
             case .failed:
                 Button { Task { if case .ready(let url) = phase { await save(url) } } } label: {
                     pill(text: "Couldn't save — tap to retry", system: "exclamationmark.arrow.circlepath",
+                         fg: Color.veTerracotta, bg: Color.veTerracotta.opacity(0.12))
+                }
+                .buttonStyle(.plain)
+            case .denied:
+                // Not a retry loop: Photos access was refused, so the tap either re-saves (if they've
+                // since granted it in Settings) or takes them there.
+                Button(action: retrySaveOrOpenSettings) {
+                    pill(text: "Enable Photos access in Settings", system: "gearshape.fill",
                          fg: Color.veTerracotta, bg: Color.veTerracotta.opacity(0.12))
                 }
                 .buttonStyle(.plain)
@@ -284,9 +294,35 @@ struct ExportView: View {
             }
             await save(url)
         } catch {
+            // Raw error goes to the log; the UI + notification get plain language (a friend should never
+            // read "AVFoundationErrorDomain -11800").
             Log.assembly("Assembly failed: \(error.localizedDescription)")
-            await MainActor.run { phase = .failed(error.localizedDescription) }
-            NotificationService.shared.notify(title: "Export hit a snag", body: error.localizedDescription)
+            let friendly = Self.isDiskFull(error)
+                ? "Your iPhone is low on storage — free up some space, then try again."
+                : "We couldn't assemble your cut — try again in a moment."
+            await MainActor.run { phase = .failed(friendly) }
+            NotificationService.shared.notify(title: "Export hit a snag", body: friendly)
+        }
+    }
+
+    /// True when any layer of the error chain says the device is out of space.
+    private static func isDiskFull(_ error: Error) -> Bool {
+        let ns = error as NSError
+        if ns.domain == AVFoundationErrorDomain, ns.code == AVError.diskFull.rawValue { return true }
+        if ns.domain == NSPOSIXErrorDomain, ns.code == Int(ENOSPC) { return true }
+        if ns.domain == NSCocoaErrorDomain, ns.code == CocoaError.fileWriteOutOfSpace.rawValue { return true }
+        if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError { return isDiskFull(underlying) }
+        return false
+    }
+
+    /// After a Photos-add denial: if access was granted in Settings since, retry the save right here;
+    /// otherwise open Settings.
+    private func retrySaveOrOpenSettings() {
+        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+        if status == .authorized || status == .limited, case .ready(let url) = phase {
+            Task { await save(url) }
+        } else if let url = URL(string: UIApplication.openSettingsURLString) {
+            UIApplication.shared.open(url)
         }
     }
 
@@ -297,6 +333,8 @@ struct ExportView: View {
             await MainActor.run { saveState = .saved }
             NotificationService.shared.notify(title: "Your edit is saved 🎉",
                                               body: "Your \(store?.vibeText ?? "") cut is in your camera roll.")
+        } catch PhotoSaveError.denied {
+            await MainActor.run { saveState = .denied }
         } catch {
             await MainActor.run { saveState = .failed(error.localizedDescription) }
         }

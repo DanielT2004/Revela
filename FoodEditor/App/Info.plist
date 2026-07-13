@@ -34,6 +34,8 @@
 	<string>Vela saves your finished, edited video back to your camera roll.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Vela transcribes your video's speech on your device so the AI can place cuts on real word boundaries instead of guessing.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Vela uses the microphone so you can record a voiceover over your edit.</string>
 	<key>SUPABASE_PROJECT_REF</key>
 	<string>$(SUPABASE_PROJECT_REF)</string>
 	<key>SUPABASE_ANON_KEY</key>

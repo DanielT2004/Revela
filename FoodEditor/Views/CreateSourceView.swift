@@ -9,6 +9,8 @@ struct CreateSourceView: View {
 
     @State private var showPicker = false
     @State private var showSoon = false
+    @State private var downloadProgress: Progress?     // non-nil while a picked video copies out of the library
+    @State private var showLoadFailToast = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -21,13 +23,13 @@ struct CreateSourceView: View {
                 Text("What should I\nlearn from?")
                     .font(VeFont.serif(30)).foregroundStyle(Color.veCharcoal).lineSpacing(2)
                     .padding(.top, 6)
-                Text("Give Vela a fresh set of videos in the style you want. It'll learn it, then you review & save.")
+                Text("Give Vela a video in the style you want. It'll learn it, then you review & save.")
                     .font(VeFont.sans(14.5)).foregroundStyle(Color.veNoteText).lineSpacing(3)
                     .padding(.top, 9)
 
                 VStack(spacing: 13) {
-                    optionRow(icon: "square.and.arrow.up", title: "Upload new videos",
-                              subtitle: "Pick videos you've made from your camera roll", soon: false) {
+                    optionRow(icon: "square.and.arrow.up", title: "Upload a new video",
+                              subtitle: "Pick a video you've made from your camera roll", soon: false) {
                         create.startUpload()
                         showPicker = true
                     }
@@ -55,18 +57,39 @@ struct CreateSourceView: View {
                         withAnimation { showSoon = false }
                     }
             }
+            if showLoadFailToast {
+                ToastView(text: "Couldn't load that video — check your connection and try again.")
+                    .padding(.bottom, 30)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .task {
+                        try? await Task.sleep(nanoseconds: 2_400_000_000)
+                        withAnimation { showLoadFailToast = false }
+                    }
+            }
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: showSoon)
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: showLoadFailToast)
         .background(Color.veCream.ignoresSafeArea())
         .fullScreenCover(isPresented: $showPicker) {
-            VideoPicker(preselectedIdentifiers: []) { picked in
+            // Up to 3 finished videos per template — cross-video repetition is what turns a guess into a
+            // confirmed signature (consolidation counts evidence per line/habit/beat). Onboarding stays 1.
+            VideoPicker(preselectedIdentifiers: [], selectionLimit: 3,
+                        onLoadingBegan: { progress in
+                            showPicker = false           // dismiss the sheet; the overlay shows the copy
+                            downloadProgress = progress
+                        }) { picked, failedCount in
                 showPicker = false
-                guard !picked.isEmpty else { return }
+                downloadProgress = nil
+                guard !picked.isEmpty else {
+                    if failedCount > 0 { withAnimation { showLoadFailToast = true } }
+                    return
+                }
                 create.ingest(picked)
                 router.go(.createSelect)
             }
             .ignoresSafeArea()
         }
+        .overlay { if let p = downloadProgress { MediaDownloadOverlay(progress: p) } }
     }
 
     private func optionRow(icon: String, title: String, subtitle: String, soon: Bool, action: @escaping () -> Void) -> some View {

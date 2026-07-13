@@ -1,0 +1,203 @@
+{
+  "type": "OBJECT",
+  "properties": {
+    "style_brief": { "type": "STRING" },
+    "video_format": {
+      "type": "OBJECT",
+      "properties": {
+        "type": { "type": "STRING" },
+        "type_custom": { "type": "STRING", "nullable": true },
+        "notes": { "type": "STRING" }
+      },
+      "propertyOrdering": ["type", "type_custom", "notes"],
+      "required": ["type", "notes"]
+    },
+    "hook": {
+      "type": "OBJECT",
+      "properties": {
+        "type": { "type": "STRING", "enum": ["food-closeup", "bite-reaction", "talking-head-claim", "text-on-screen", "plating", "action", "pov", "social-proof-montage", "other"] },
+        "type_custom": { "type": "STRING", "nullable": true },
+        "opens_within_seconds": { "type": "NUMBER" },
+        "has_text_overlay": { "type": "BOOLEAN" },
+        "description": { "type": "STRING" },
+        "montage": {
+          "type": "OBJECT",
+          "properties": {
+            "is_montage": { "type": "BOOLEAN" },
+            "source": { "type": "STRING", "nullable": true },
+            "clip_count_estimate": { "type": "NUMBER" },
+            "avg_clip_seconds": { "type": "NUMBER" }
+          },
+          "propertyOrdering": ["is_montage", "source", "clip_count_estimate", "avg_clip_seconds"],
+          "required": ["is_montage"]
+        }
+      },
+      "propertyOrdering": ["type", "type_custom", "opens_within_seconds", "has_text_overlay", "description", "montage"],
+      "required": ["type", "opens_within_seconds", "has_text_overlay", "description", "montage"]
+    },
+    "pacing": {
+      "type": "OBJECT",
+      "properties": {
+        "total_length_seconds": { "type": "NUMBER" },
+        "average_clip_length_seconds": { "type": "NUMBER" },
+        "cut_style": { "type": "STRING", "enum": ["fast-punchy", "medium", "slow-lingering", "other"] },
+        "cut_style_custom": { "type": "STRING", "nullable": true },
+        "pacing_notes": { "type": "STRING" }
+      },
+      "propertyOrdering": ["total_length_seconds", "average_clip_length_seconds", "cut_style", "cut_style_custom", "pacing_notes"],
+      "required": ["total_length_seconds", "average_clip_length_seconds", "cut_style", "pacing_notes"]
+    },
+    "voiceover_vs_oncamera": {
+      "type": "OBJECT",
+      "properties": {
+        "primary_mode": { "type": "STRING", "enum": ["mostly-voiceover-over-broll", "mostly-talking-to-camera", "even-mix", "other"] },
+        "primary_mode_custom": { "type": "STRING", "nullable": true },
+        "voiceover_ratio": { "type": "NUMBER" },
+        "talks_to_camera": { "type": "BOOLEAN" },
+        "notes": { "type": "STRING" }
+      },
+      "propertyOrdering": ["primary_mode", "primary_mode_custom", "voiceover_ratio", "talks_to_camera", "notes"],
+      "required": ["primary_mode", "voiceover_ratio", "talks_to_camera", "notes"]
+    },
+    "broll": {
+      "type": "OBJECT",
+      "properties": {
+        "amount": { "type": "STRING", "enum": ["heavy", "moderate", "minimal"] },
+        "usage": { "type": "STRING" },
+        "usage_custom": { "type": "STRING", "nullable": true },
+        "favored_shots": { "type": "ARRAY", "items": { "type": "STRING" } },
+        "notes": { "type": "STRING" }
+      },
+      "propertyOrdering": ["amount", "usage", "usage_custom", "favored_shots", "notes"],
+      "required": ["amount", "usage", "favored_shots", "notes"]
+    },
+    "structure": {
+      "type": "OBJECT",
+      "properties": {
+        "arc": { "type": "ARRAY", "items": { "type": "STRING" } },
+        "sections": {
+          "type": "ARRAY",
+          "items": {
+            "type": "OBJECT",
+            "properties": {
+              "section": { "type": "STRING", "enum": ["intro", "middle", "end"] },
+              "purpose": { "type": "STRING" },
+              "beats": {
+                "type": "ARRAY",
+                "items": {
+                  "type": "OBJECT",
+                  "properties": {
+                    "label": { "type": "STRING" },
+                    "time_hint": { "type": "STRING" },
+                    "example": { "type": "STRING", "nullable": true }
+                  },
+                  "propertyOrdering": ["label", "time_hint", "example"],
+                  "required": ["label", "time_hint"]
+                }
+              }
+            },
+            "propertyOrdering": ["section", "purpose", "beats"],
+            "required": ["section", "purpose", "beats"]
+          }
+        },
+        "notes": { "type": "STRING" }
+      },
+      "propertyOrdering": ["arc", "sections", "notes"],
+      "required": ["arc", "sections", "notes"]
+    },
+    "text_and_graphics": {
+      "type": "OBJECT",
+      "properties": {
+        "uses_text_overlays": { "type": "BOOLEAN" },
+        "text_style": { "type": "STRING" },
+        "text_style_custom": { "type": "STRING", "nullable": true },
+        "amount": { "type": "STRING" }
+      },
+      "propertyOrdering": ["uses_text_overlays", "text_style", "text_style_custom", "amount"],
+      "required": ["uses_text_overlays", "text_style", "amount"]
+    },
+    "audio": {
+      "type": "OBJECT",
+      "properties": {
+        "bed": { "type": "STRING" },
+        "bed_custom": { "type": "STRING", "nullable": true },
+        "keeps_natural_food_sounds": { "type": "BOOLEAN" },
+        "notes": { "type": "STRING" }
+      },
+      "propertyOrdering": ["bed", "bed_custom", "keeps_natural_food_sounds", "notes"],
+      "required": ["bed", "keeps_natural_food_sounds", "notes"]
+    },
+    "closing": {
+      "type": "OBJECT",
+      "properties": {
+        "type": { "type": "STRING", "enum": ["verdict", "rating", "call-to-action", "final-beauty-shot", "abrupt", "other"] },
+        "type_custom": { "type": "STRING", "nullable": true },
+        "description": { "type": "STRING" }
+      },
+      "propertyOrdering": ["type", "type_custom", "description"],
+      "required": ["type", "description"]
+    },
+    "verbal_style": {
+      "type": "OBJECT",
+      "properties": {
+        "tone": { "type": "STRING" },
+        "pov": { "type": "STRING" },
+        "rating_format": { "type": "STRING", "nullable": true },
+        "rating_scope": { "type": "STRING", "nullable": true, "enum": ["overall", "per-item", "both"] },
+        "signoff": { "type": "STRING", "nullable": true },
+        "recurring_lines": {
+          "type": "ARRAY",
+          "items": {
+            "type": "OBJECT",
+            "properties": {
+              "quote": { "type": "STRING" },
+              "where_used": { "type": "STRING", "enum": ["hook", "verdict", "sign-off", "transition", "throughout"] },
+              "medium": { "type": "STRING", "enum": ["spoken", "text-overlay"] },
+              "pattern": { "type": "STRING", "nullable": true },
+              "position": { "type": "STRING", "enum": ["opening", "mid", "closing"] },
+              "delivery_note": { "type": "STRING" },
+              "likely_habit": { "type": "NUMBER" }
+            },
+            "propertyOrdering": ["quote", "where_used", "medium", "pattern", "position", "delivery_note", "likely_habit"],
+            "required": ["quote", "where_used", "medium", "position", "delivery_note", "likely_habit"]
+          }
+        }
+      },
+      "propertyOrdering": ["tone", "pov", "rating_format", "rating_scope", "signoff", "recurring_lines"],
+      "required": ["tone", "pov", "recurring_lines"]
+    },
+    "habit_candidates": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": {
+          "label": { "type": "STRING" },
+          "detail": { "type": "STRING" },
+          "kind": { "type": "STRING", "enum": ["selection", "verbal", "supplied-footage", "visual-effect"] },
+          "likely_habit": { "type": "NUMBER" },
+          "times_seen_in_video": { "type": "NUMBER" }
+        },
+        "propertyOrdering": ["label", "detail", "kind", "likely_habit", "times_seen_in_video"],
+        "required": ["label", "detail", "kind", "likely_habit", "times_seen_in_video"]
+      }
+    },
+    "reveal_script": { "type": "ARRAY", "items": { "type": "STRING" } },
+    "signature_moves": {
+      "type": "ARRAY",
+      "items": {
+        "type": "OBJECT",
+        "properties": {
+          "move": { "type": "STRING" },
+          "likely_habit": { "type": "NUMBER" }
+        },
+        "propertyOrdering": ["move", "likely_habit"],
+        "required": ["move", "likely_habit"]
+      }
+    },
+    "anything_unusual": { "type": "STRING", "nullable": true },
+    "scene_types_present": { "type": "ARRAY", "items": { "type": "STRING" } },
+    "confidence": { "type": "NUMBER" }
+  },
+  "propertyOrdering": ["style_brief", "video_format", "hook", "pacing", "voiceover_vs_oncamera", "broll", "structure", "text_and_graphics", "audio", "closing", "verbal_style", "habit_candidates", "reveal_script", "signature_moves", "anything_unusual", "scene_types_present", "confidence"],
+  "required": ["style_brief", "video_format", "hook", "pacing", "voiceover_vs_oncamera", "broll", "structure", "text_and_graphics", "audio", "closing", "verbal_style", "habit_candidates", "reveal_script", "signature_moves", "scene_types_present", "confidence"]
+}
