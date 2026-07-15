@@ -18,7 +18,7 @@ Goal: a TestFlight build a paying stranger can use without hand-holding, plus th
 - [ ] Device-test footage-conservation ship (Sort full bounds, TrimFootageBar, gap-fill cards)
 - [ ] Founding-member paywall screen ($5-10/mo, locked-forever framing; fake-door OK to start)
 - [ ] Anonymized funnel logging (import → analysis → first export → fifth export)
-- [ ] Draft the r/UGCcreators recruiting post + TikTok DM script (ready to fire the day Phase 0 closes)
+- [ ] Draft recruiting posts + TikTok DM script for BOTH cohorts — Maya (food/travel growth creators, r/Tiktokhelp / TikTok DMs) and Sofia (r/UGCcreators) — ready to fire the day Phase 0 closes
 
 ## Gate metrics (Phase 2 target)
 
@@ -47,6 +47,7 @@ Goal: a TestFlight build a paying stranger can use without hand-holding, plus th
 
 ## Decision log
 
+- **2026-07-14** — PERSONA.md adopted (Daniel's call, adapting his research): PRIMARY = Maya R., growth-stage food/travel short-form creator (own-account, 4-7 videos/wk, 2-3 hrs editing each, control-freak-but-time-poor); SECONDARY = Sofia, client-paid food UGC creator (clearest willingness-to-pay per web research); TERTIARY = Tariq, unpaid grinder (Daniel's add — same pains, ~$0 WTP; recruit for feedback/evangelism, track his cohort separately, never design pricing around him). Phase 1 recruits all cohorts; fifth-video retention among PAYERS decides lead positioning. Maya Test (9 rules) is now design law; wired into CLAUDE.md "Who we build for". Noted gap: caption generation is on Maya's MVP must-have list but parked — revisit at Phase 1 if testers confirm.
 - **2026-07-14** — /ceo skill created. Strategy locked: one product, sequence (a) food-UGC wedge → (b) HITL plan + Read + style templates as moat → (c) niche expansion post-gate. Phase 0 opened.
 - **2026-07-13** — Validation research run (memory `market-validation-research-2026-07`). Verdict: wedge is real but narrow; hobbyist-food positioning weak, UGC-pro positioning strong; fifth-video retention chosen as the gate metric; quit-job bar defined.
 - **2026-07-12** — Beta feedback #1 (Meka): "analytics app with an editor attached"; autoplay bug; simplicity direction (memory `beta-feedback-meka`).

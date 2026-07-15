@@ -9,6 +9,16 @@ iOS-only. Swift / SwiftUI (Observation), AVFoundation, PhotosUI, Swift Concurren
 dependencies** — all Apple-native. Aesthetic is **"Warm Editorial"**: food is the hero, the chrome
 recedes, no blue / no AI-gradients.
 
+## Who we build for
+
+Target users live in [.claude/skills/ceo/PERSONA.md](.claude/skills/ceo/PERSONA.md) — read it before
+designing any feature or screen. Primary: **"Maya,"** a growth-stage food/travel short-form creator
+(4–7 videos/week, 2–3 hrs editing each, control-freak-but-time-poor — *"I want editing to feel like
+decisions, not a puzzle"*). Every feature passes **the Maya Test** (defined there): decisions not
+puzzles, speed to first cut, AI-proposes-she-disposes, her voice preserved, footage never silently
+lost, post-ready output, interruptible, no metering. Strategy/phase state lives in
+[.claude/skills/ceo/STATE.md](.claude/skills/ceo/STATE.md) (`/ceo` skill).
+
 ---
 
 ## Build, run, verify

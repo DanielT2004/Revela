@@ -514,16 +514,19 @@ final class EditPlanStore {
     /// in-point can move, and a clip can grow back toward the AI's full bounds (this is how hidden
     /// trimmed footage is recovered on Polish). (These change `baseDuration` without rippling, so the
     /// narration clamp runs here too.)
-    func setIn(_ cid: UUID, toSource newIn: Double) {
-        guard let i = clipIndex(cid), let s = segmentsById[order[i].sourceSegmentId] else { return }
+    /// `minBound` / `maxBound` are the clip's reachable source range in merged-proxy seconds. The caller
+    /// passes the ORIGINAL recording's `SourceSpan` bounds (not the ~15s segment), so a trim can drag past
+    /// the segment to reveal the rest of the clip it was cut from (Meka #10).
+    func setIn(_ cid: UUID, toSource newIn: Double, minBound: Double) {
+        guard let i = clipIndex(cid) else { return }
         let snapped = (newIn * 30).rounded() / 30
-        order[i].inPoint = max(s.startSeconds, min(snapped, order[i].outPoint - 1.0 / 30))
+        order[i].inPoint = max(minBound, min(snapped, order[i].outPoint - 1.0 / 30))
         clampNarrationIntoBounds()
     }
-    func setOut(_ cid: UUID, toSource newOut: Double) {
-        guard let i = clipIndex(cid), let s = segmentsById[order[i].sourceSegmentId] else { return }
+    func setOut(_ cid: UUID, toSource newOut: Double, maxBound: Double) {
+        guard let i = clipIndex(cid) else { return }
         let snapped = (newOut * 30).rounded() / 30
-        order[i].outPoint = min(s.endSeconds, max(snapped, order[i].inPoint + 1.0 / 30))
+        order[i].outPoint = min(maxBound, max(snapped, order[i].inPoint + 1.0 / 30))
         clampNarrationIntoBounds()
     }
 

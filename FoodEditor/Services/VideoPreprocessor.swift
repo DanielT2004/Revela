@@ -168,10 +168,21 @@ enum VideoPreprocessor {
         }
         defer { progressTask.cancel() }
 
-        // iOS 17-compatible export (the no-arg async `export()` is iOS 18+).
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            export.exportAsynchronously { continuation.resume() }
+        // iOS 17-compatible export (the no-arg async `export()` is iOS 18+). Honor cancellation: if the
+        // pipeline Task is cancelled (creator tapped Cancel mid-compress), stop the export session so it
+        // doesn't keep encoding — and, crucially, stops its progress poll from mutating a superseded run's
+        // `progress` (the "14% ↔ 0%" flicker when a cancelled compress raced a freshly-started one).
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                export.exportAsynchronously { continuation.resume() }
+            }
+        } onCancel: {
+            export.cancelExport()
         }
+        // A cancelled export unwinds as a CancellationError (not a PreprocessError.exportFailed) so the
+        // coordinator's `catch is CancellationError` leaves the just-reset `.idle` state alone instead of
+        // flipping the screen to `.failed`.
+        try Task.checkCancellation()
         onProgress(1.0)
 
         guard export.status == .completed else {

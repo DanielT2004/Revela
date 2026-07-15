@@ -38,6 +38,7 @@ struct PolishView: View {
     @State private var trimDrag: TrimDrag?
     @State private var lift: LiftDrag?
     @State private var autoScroller = EdgeAutoScroller(axis: .horizontal)
+    @State private var momentum = MomentumScroller()  // fling-to-coast glide after a timeline scrub
     @State private var autoPanX: CGFloat = 0          // px the timeline auto-scrolled during the current lift
     @State private var inspector: InspectorMode?
     @State private var splitFlash: SplitFlash?       // brief toast + scissor badge after a split
@@ -1193,11 +1194,28 @@ struct PolishView: View {
         DragGesture(minimumDistance: 3)
             .onChanged { v in
                 if zooming || lifting || narration.isBusy { return }
-                if !scrubbing { scrubbing = true; scrubStartX = scrollX; previewPlaying = false; player.pause() }
+                if !scrubbing { momentum.stop(); scrubbing = true; scrubStartX = scrollX; previewPlaying = false; player.pause() }
                 scrollX = clampScroll(scrubStartX - v.translation.width)
                 seekPlayerOnly(to: playheadTime)
             }
-            .onEnded { _ in scrubbing = false }
+            .onEnded { v in
+                scrubbing = false
+                // Coast on the release velocity (scrollX moves opposite the finger). A gentle lift with
+                // no real flick falls below the cutoff and lands exactly, so precise scrubs still work.
+                startMomentum(velocity: -v.velocity.width)
+            }
+    }
+
+    /// Fling the timeline: glide `scrollX` with a decaying velocity so a flick keeps scrolling and eases
+    /// to a stop, seeking the preview along the way. Stops dead at t=0 / the end (no rubber-band in v1).
+    private func startMomentum(velocity vx: CGFloat) {
+        momentum.onTick = { delta in
+            let newX = clampScroll(scrollX + delta)
+            if newX == scrollX { momentum.stop(); return }
+            scrollX = newX
+            seekPlayerOnly(to: playheadTime)
+        }
+        momentum.start(velocity: vx)
     }
 
     /// Pinch to zoom the timeline toward frame level. The time under the playhead stays pinned.
@@ -1205,7 +1223,7 @@ struct PolishView: View {
         MagnificationGesture()
             .onChanged { scale in
                 if narration.isBusy { return }
-                if !zooming { zooming = true; zoomBasePps = pps; zoomAnchorTime = playheadTime }
+                if !zooming { momentum.stop(); zooming = true; zoomBasePps = pps; zoomAnchorTime = playheadTime }
                 pps = clampPps(zoomBasePps * scale)
                 scrollX = clampScroll(CGFloat(zoomAnchorTime) * pps)
             }
@@ -1217,6 +1235,7 @@ struct PolishView: View {
 
     private func togglePlay() {
         guard !narration.isBusy else { return }
+        momentum.stop()
         previewPlaying.toggle()
         if previewPlaying {
             if playheadTime >= total - 0.05 { scrollX = 0; player.seek(to: .zero) }
@@ -1228,6 +1247,7 @@ struct PolishView: View {
 
     private func step(by frames: Int) {
         guard !narration.isBusy else { return }
+        momentum.stop()
         previewPlaying = false; player.pause()
         let snapped = (playheadTime * 30).rounded() / 30
         let t = max(0, min(snapped + Double(frames) * oneFrame, total))
@@ -1287,6 +1307,7 @@ struct PolishView: View {
                 DragGesture(minimumDistance: 1, coordinateSpace: .named(timelineSpace))
                     .onChanged { v in
                         if trimDrag == nil {
+                            momentum.stop()
                             store?.pushUndo()
                             trimDrag = TrimDrag(sel: sel, leftEdge: leftEdge, baseLeft: left, baseRight: right, factor: factor)
                             trimming = true; previewPlaying = false; player.pause()
@@ -1297,12 +1318,32 @@ struct PolishView: View {
             )
     }
 
+    /// Reachable source range (merged-proxy seconds) for a base clip: the full extent of the ORIGINAL
+    /// recording it was cut from, via that clip's `SourceSpan`. This is what lets a trim handle drag past
+    /// the ~15s segment to recover the rest of the take (Meka #10). Falls back to the segment bounds when
+    /// spans are unavailable (e.g. a restored project whose proxy is a single span already spans it all).
+    private func baseSourceBounds(_ cid: UUID) -> (lo: Double, hi: Double) {
+        guard let store, let clip = store.order.first(where: { $0.id == cid }),
+              let s = store.segment(clip.sourceSegmentId) else { return (0, total) }
+        guard let spans = session.merged?.sourceSpans,
+              let span = spans.first(where: {
+                  s.startSeconds >= $0.startInMerged - 0.001 &&
+                  s.startSeconds < $0.startInMerged + $0.duration + 0.001
+              })
+        // inPoint/outPoint and startInMerged share the merged-proxy axis, so the span IS the range —
+        // don't clamp to `total`, which is the (different) edited-timeline length.
+        else { return (s.startSeconds, s.endSeconds) }
+        return (span.startInMerged, span.startInMerged + span.duration)
+    }
+
     private func commitTrim() {
         guard let d = trimDrag, let store else { trimDrag = nil; trimming = false; return }
         let disp = trimDisplay(d)
         switch d.sel {
         case .base(let cid):
-            if d.leftEdge { store.setIn(cid, toSource: disp.lo) } else { store.setOut(cid, toSource: disp.hi) }
+            let b = baseSourceBounds(cid)
+            if d.leftEdge { store.setIn(cid, toSource: disp.lo, minBound: b.lo) }
+            else { store.setOut(cid, toSource: disp.hi, maxBound: b.hi) }
         case .overlay(let oid):
             if d.leftEdge { store.setOverlayLeftEdge(oid, toStart: disp.lo) }
             else { store.setOverlayRightEdge(oid, toEnd: disp.hi) }
@@ -1322,10 +1363,10 @@ struct PolishView: View {
         let delta = Double(d.dx / pps) * d.factor
         switch d.sel {
         case .base(let cid):
-            guard let clip = store.order.first(where: { $0.id == cid }), let s = store.segment(clip.sourceSegmentId)
-            else { return (d.baseLeft, d.baseRight) }
-            if d.leftEdge { return (min(max(d.baseLeft + delta, s.startSeconds), d.baseRight - oneFrame), d.baseRight) }
-            return (d.baseLeft, max(min(d.baseRight + delta, s.endSeconds), d.baseLeft + oneFrame))
+            guard store.order.contains(where: { $0.id == cid }) else { return (d.baseLeft, d.baseRight) }
+            let b = baseSourceBounds(cid)
+            if d.leftEdge { return (min(max(d.baseLeft + delta, b.lo), d.baseRight - oneFrame), d.baseRight) }
+            return (d.baseLeft, max(min(d.baseRight + delta, b.hi), d.baseLeft + oneFrame))
         case .overlay(let oid):
             guard let o = store.brollLane.first(where: { $0.id == oid }), let seg = store.segment(o.sourceSegmentId)
             else { return (d.baseLeft, d.baseRight) }
@@ -1526,6 +1567,7 @@ struct PolishView: View {
             .onChanged { value in
                 guard case .second(true, let drag) = value, !narration.isBusy else { return }
                 if lift == nil {
+                    momentum.stop()
                     lift = LiftDrag(sel: sel, baseStart: baseStart)
                     autoPanX = 0
                     selection = sel; inspector = nil
@@ -1759,7 +1801,7 @@ struct PolishView: View {
     }
 
     private func keyboardTab(_ o: TextOverlay) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             TextField("Add text", text: Binding(get: { editingOverlay?.string ?? "" },
                                                 set: { v in editText { $0.string = v } }), axis: .vertical)
                 .font(VeFont.sans(17, weight: .semibold)).foregroundStyle(Color.veCharcoal)
@@ -1769,11 +1811,69 @@ struct PolishView: View {
                 .padding(12)
                 .background(Color.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color.veCharcoal.opacity(0.1), lineWidth: 1))
-                .onAppear { textFieldFocused = true }
+                .onAppear { raiseKeyboard(for: o.id) }
+
+            timingRow(o)
+
             Text("Drag the caption on the video to move it; drag a corner dot to resize, the ↻ handle to rotate.")
                 .font(VeFont.sans(11.5)).foregroundStyle(Color.veWarmGray)
         }
         .padding(16)
+    }
+
+    /// Tappable start / duration steppers for the caption — a visible, editable affordance for its timing
+    /// (Meka #7), so it's not only reachable via the timeline trim handles.
+    private func timingRow(_ o: TextOverlay) -> some View {
+        HStack(spacing: 10) {
+            timeStepper(label: "Starts at", value: o.startTime) { d in
+                timingEdit { store?.moveTextOverlay(o.id, toStart: o.startTime + d) }
+            }
+            timeStepper(label: "Shows for", value: o.duration) { d in
+                timingEdit { store?.setTextBounds(o.id, start: o.startTime, end: o.startTime + o.duration + d) }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func timeStepper(label: String, value: Double, onDelta: @escaping (Double) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(VeFont.sans(10.5, weight: .semibold)).foregroundStyle(Color.veWarmGray)
+            HStack(spacing: 0) {
+                Button { onDelta(-0.1); UIImpactFeedbackGenerator(style: .light).impactOccurred() } label: {
+                    Image(systemName: "minus").font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Color.veTerracotta).frame(width: 32, height: 28)
+                }
+                Text(String(format: "%.1fs", value))
+                    .font(VeFont.mono(13, weight: .semibold)).foregroundStyle(Color.veCharcoal)
+                    .frame(minWidth: 44)
+                Button { onDelta(0.1); UIImpactFeedbackGenerator(style: .light).impactOccurred() } label: {
+                    Image(systemName: "plus").font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Color.veTerracotta).frame(width: 32, height: 28)
+                }
+            }
+            .background(Color.white, in: Capsule())
+            .overlay(Capsule().stroke(Color.veCharcoal.opacity(0.1), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Raise the keyboard for a freshly-added / tapped caption in ONE step. A partial-detent sheet
+    /// (`.height(308)`) drops a focus requested mid-presentation — the "tap twice" bug — so we assert
+    /// focus immediately and again across the present animation, stopping once it takes.
+    private func raiseKeyboard(for id: UUID) {
+        textFieldFocused = true
+        for delay in [0.1, 0.3, 0.55] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                if editingText == id, !textFieldFocused { textFieldFocused = true }
+            }
+        }
+    }
+
+    /// Push undo once per edit session (matching `editText`), then apply a timing tweak.
+    private func timingEdit(_ apply: () -> Void) {
+        guard let store else { return }
+        if !textSessionPushed { store.pushUndo(); textSessionPushed = true }
+        apply()
     }
 
     private func fontTab(_ o: TextOverlay) -> some View {

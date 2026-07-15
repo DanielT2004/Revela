@@ -76,6 +76,13 @@ final class AnalysisCoordinator {
     private var signature: String?
     /// The owned pipeline task. Lives here (not in the View) so analysis survives the view disappearing.
     private var task: Task<Void, Never>?
+    /// Monotonic run counter, bumped on every launch / resume / cancel. The async progress callbacks (the
+    /// merge export's poll, the server-job poll) capture the token current when their run began and no-op
+    /// once it changes — so a superseded run (cancelled, or replaced by a fresh submission) can never write
+    /// into the live run's `progress`. This kills the "14% ↔ 0%" flicker when a creator cancels mid-compress
+    /// and immediately re-submits: the old AVFoundation export's progress loop was still firing (this
+    /// coordinator is long-lived, so `[weak self]` never lets it go) while the new run climbed from 0.
+    private var runToken = 0
     /// The active style's injection block (M7), or "" for a generic edit. Set at launch.
     private var styleBlock = ""
     /// The per-video Pre-Edit Brief block, or "" if no brief. Prepended after the style block. Set at launch.
@@ -121,6 +128,7 @@ final class AnalysisCoordinator {
     func cancel() {
         task?.cancel()
         task = nil
+        runToken &+= 1           // invalidate any in-flight progress callbacks from the cancelled run
         stallTask?.cancel()
         stallTask = nil
         isSlow = false
@@ -149,8 +157,10 @@ final class AnalysisCoordinator {
         etaSeconds = nil
         prepStartedAt = nil
         smoothedEta = nil
+        runToken &+= 1
+        let token = runToken
         task = Task { [weak self] in
-            await self?.runPipeline(session: session, projects: projects)
+            await self?.runPipeline(session: session, projects: projects, token: token)
         }
         startStallWatch()
     }
@@ -173,7 +183,7 @@ final class AnalysisCoordinator {
         }
     }
 
-    private func runPipeline(session: VideoSession, projects: ProjectService) async {
+    private func runPipeline(session: VideoSession, projects: ProjectService, token: Int) async {
         // Ask for notification permission up front (non-blocking) so we can ping when done.
         Task { await NotificationService.shared.requestAuthorization() }
         do {
@@ -194,8 +204,9 @@ final class AnalysisCoordinator {
                 async let compressed: ProcessedVideo = BackgroundActivity.run("vela-prep") {
                     try await VideoPreprocessor.mergeAndCompress(clips: session.clips) { [weak self] p in
                         Task { @MainActor in
-                            self?.progress = p * 0.30
-                            self?.updatePrepETA(progress: p)
+                            guard let self, self.runToken == token else { return }   // ignore a superseded run
+                            self.progress = p * 0.30
+                            self.updatePrepETA(progress: p)
                         }
                     }
                 }
@@ -232,7 +243,7 @@ final class AnalysisCoordinator {
                 AnalysisJobStore.save(jobId: perceiveJob, clipSignature: signature ?? "",
                                       proxyURL: processed.url, brollCoverageTarget: brollCoverageTarget)
                 stage = .analyzing
-                let indexRaw = try await pollUntilFinished(jobId: perceiveJob)
+                let indexRaw = try await pollUntilFinished(jobId: perceiveJob, token: token)
                 if Task.isCancelled { return }
                 // DECIDE (text-only, Pro) → ADAPT → ship.
                 try await decideAndShip(indexRaw: indexRaw, styleBriefBlock: styleBlock + briefBlock,
@@ -247,7 +258,7 @@ final class AnalysisCoordinator {
                 AnalysisJobStore.save(jobId: jobId, clipSignature: signature ?? "",
                                       proxyURL: processed.url, brollCoverageTarget: brollCoverageTarget)
                 stage = .analyzing
-                let raw = try await pollUntilFinished(jobId: jobId)
+                let raw = try await pollUntilFinished(jobId: jobId, token: token)
                 if Task.isCancelled { return }
                 let parsed = try EditPlan.parse(fromRawModelText: raw)
                 try await ship(parsed: parsed, processed: processed, session: session, projects: projects,
@@ -289,11 +300,12 @@ final class AnalysisCoordinator {
 
     /// Polls the server job until it finishes, nudging the progress arc on each active tick. The poll /
     /// transient-swallow / cancellation / timeout logic lives in the shared `GeminiService.awaitJobResult`.
-    private func pollUntilFinished(jobId: String, editing: Bool = false) async throws -> String {
+    private func pollUntilFinished(jobId: String, token: Int, editing: Bool = false) async throws -> String {
         try await GeminiService.shared.awaitJobResult(jobId: jobId) { [weak self] stage in
             Task { @MainActor in
-                self?.label = editing ? "Editing your video" : stage   // DECIDE poll keeps the editing label
-                self?.progress = min(0.97, max(self?.progress ?? 0, editing ? 0.92 : 0.6) + (editing ? 0.008 : 0.015))
+                guard let self, self.runToken == token else { return }   // ignore a superseded run
+                self.label = editing ? "Editing your video" : stage   // DECIDE poll keeps the editing label
+                self.progress = min(0.97, max(self.progress, editing ? 0.92 : 0.6) + (editing ? 0.008 : 0.015))
             }
         }
     }
@@ -464,13 +476,15 @@ final class AnalysisCoordinator {
         progress = 0.6
         label = "Analyzing your footage"
         rawResponse = nil
+        runToken &+= 1
+        let token = runToken
         task = Task { [weak self] in
-            await self?.resumePipeline(pending: pending, session: session, projects: projects)
+            await self?.resumePipeline(pending: pending, session: session, projects: projects, token: token)
         }
         return true
     }
 
-    private func resumePipeline(pending: PendingAnalysisJob, session: VideoSession, projects: ProjectService) async {
+    private func resumePipeline(pending: PendingAnalysisJob, session: VideoSession, projects: ProjectService, token: Int) async {
         Task { await NotificationService.shared.requestAuthorization() }
         do {
             // Rebuild the merged proxy from the durable copy if the session lost it (cold launch after a
@@ -492,7 +506,7 @@ final class AnalysisCoordinator {
                 session.merged = processed
             }
 
-            let raw = try await pollUntilFinished(jobId: pending.jobId)
+            let raw = try await pollUntilFinished(jobId: pending.jobId, token: token)
             if Task.isCancelled { return }
             // The persisted job is whichever first call ran (PERCEIVE for two-call, the edit-plan call for
             // monolith). Resumed after a kill, style/brief are lost (DECIDE falls back to general judgement)
