@@ -36,7 +36,7 @@ struct SlicePlayerSheet: View {
                 // leaving the sheet's interactive dismiss untouched.
                 .onLongPressGesture(minimumDuration: 0.2, maximumDistance: 12, pressing: { down in
                     fastForward = down
-                    player.rate = down ? 2.0 : (scrubbing ? 0 : 1.0)
+                    applyRate()
                     if down { UIImpactFeedbackGenerator(style: .rigid).impactOccurred() }
                 }, perform: {})
 
@@ -101,14 +101,14 @@ struct SlicePlayerSheet: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { v in
-                        if !scrubbing { scrubbing = true; player.pause() }
+                        if !scrubbing { scrubbing = true; applyRate() }   // pause while scrubbing
                         let frac = max(0, min(1, v.location.x / max(1, w)))
                         progress = frac
                         seek(toFraction: frac)
                     }
                     .onEnded { _ in
                         scrubbing = false
-                        player.rate = fastForward ? 2.0 : 1.0   // resume (2× if still held)
+                        applyRate()                                       // resume (2× if still held)
                     }
             )
             .animation(.spring(response: 0.25, dampingFraction: 0.8), value: scrubbing)
@@ -122,11 +122,18 @@ struct SlicePlayerSheet: View {
                     toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
+    /// Single source of truth for playback rate, derived from state — so the hold-2× gesture and the
+    /// scrub gesture (which both drive the player) can't race to leave it paused or stuck at 2×.
+    private func applyRate() {
+        player.rate = scrubbing ? 0 : (fastForward ? 2 : 1)
+    }
+
     private func start_() {
         AudioSession.configureForPlayback()   // ensure sound plays even on silent mode
         player.replaceCurrentItem(with: AVPlayerItem(url: url))
         player.seek(to: startTime, toleranceBefore: .zero, toleranceAfter: .zero)
         player.play()
+        guard observer == nil else { return }   // a repeat .onAppear must not stack a 2nd observer
         // Drive the scrub bar and loop the slice: when we pass the end, jump back to the start.
         observer = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.03, preferredTimescale: 600), queue: .main
@@ -136,7 +143,7 @@ struct SlicePlayerSheet: View {
             if t >= end - 0.02 {
                 player.seek(to: startTime, toleranceBefore: .zero, toleranceAfter: .zero)
                 progress = 0
-                if !fastForward { player.play() }   // rate persists across the seek when held at 2×
+                applyRate()   // re-assert rate after the wrap — at the asset's end 2× would otherwise freeze
             } else {
                 progress = max(0, min(1, (t - start) / span))
             }

@@ -64,14 +64,18 @@ struct StyleRevealView: View {
             return s
         }
         let n = max(1, template.count)
+        let contested = Set(diff?.contested ?? [])
         var s: [Slide] = [.text("Okay\(nameClause).\nI watched your video\(n > 1 ? "s" : "").")]
         // Script lines — model-authored; derived fallback so old profiles still get a story. Budget:
         // N=1 (every onboarding user) stays tight — 3 lines + 1 quote; N≥2 earns the fuller set.
         let script = template.profile.revealScript.isEmpty ? derivedScript : template.profile.revealScript
         s += script.prefix(n > 1 ? 5 : 3).map { .text($0) }
         // Pull-quote slides — the creator's own words, huge. Spoken lines first, best evidence first.
+        // Same M1 evidence gate as the confirm cards: only enshrine a line we can PROVE recurs — never a
+        // one-off reaction from a single video (a huge charcoal pull-quote is a claim, so it must earn it).
         let quotable = template.profile.verbalStyle.recurringLines
-            .filter { $0.confirmation != "out" && !$0.quote.trimmingCharacters(in: .whitespaces).isEmpty }
+            .filter { $0.confirmation != "out" && !$0.quote.trimmingCharacters(in: .whitespaces).isEmpty
+                      && lineProven($0, contested: contested) }
             .sorted { a, b in
                 if a.isSpoken != b.isSpoken { return a.isSpoken }
                 return a.evidenceCount != b.evidenceCount ? a.evidenceCount > b.evidenceCount : a.likelyHabit > b.likelyHabit
@@ -82,7 +86,49 @@ struct StyleRevealView: View {
                 : "— you, in this video"
             s.append(.quote(line.quote, attribution: attribution))
         }
+        // Honest-absence beat — never manufacture a catchphrase from thin evidence. If nothing recurs
+        // provably, say so warmly (the feel-heard beat) instead of teeing up a one-off to "lock in".
+        if !hasLockableSignature {
+            s.append(.text("No catchphrase yet — and honestly, most creators don't have one. Your signature lives in how you cut, not one line you repeat. If a line starts showing up every time, I'll bring it to you."))
+        }
         return s
+    }
+
+    /// M1 evidence gate — a verbatim signature is only "lockable" when repetition is actually PROVEN, never
+    /// guessed from one sighting. Multi-video learns require code-verified evidence in ≥2 sources
+    /// (`evidence_count`, set by `StyleConsolidator.applySeenIn`); single-video learns can never reach 2, so
+    /// they surface NO verbatim-line cards — the line stays in the profile, unconfirmed, for a later learn to
+    /// promote. Contested lines (mini-reveal re-asks) bypass: they were confirmed before, just being re-checked.
+    private func lineProven(_ line: RecurringLine, contested: Set<String>) -> Bool {
+        contested.contains(line.key) || line.evidenceCount >= 2
+    }
+
+    /// The scalar sign-off carries no `evidence_count`, so derive it the way the consolidator verifies
+    /// `seen_in`: count sources whose spoken lines / sign-off contain it (normalized substring, either way).
+    private func signoffHits(_ signoff: String) -> Int {
+        let needle = signoff.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return 0 }
+        let srcs = template.sources.isEmpty ? [template.profile] : template.sources
+        return srcs.filter { src in
+            let hay = src.verbalStyle.recurringLines.map { $0.quote.lowercased() } + [src.verbalStyle.signoff.lowercased()]
+            return hay.contains { !$0.isEmpty && ($0.contains(needle) || needle.contains($0)) }
+        }.count
+    }
+
+    private func signoffProven(_ signoff: String, contested: Set<String>) -> Bool {
+        contested.contains("__signoff__") || signoffHits(signoff) >= 2
+    }
+
+    /// Is there any verbatim line OR sign-off that clears the gate? Drives the honest-absence beat — false
+    /// means we caught no provable catchphrase (the common, healthy case), so we say so rather than fake one.
+    private var hasLockableSignature: Bool {
+        let contested = Set(diff?.contested ?? [])
+        let vs = template.profile.verbalStyle
+        if vs.recurringLines.contains(where: {
+            $0.isSpoken && !$0.quote.trimmingCharacters(in: .whitespaces).isEmpty && lineProven($0, contested: contested)
+        }) { return true }
+        let signoff = vs.signoff.trimmingCharacters(in: .whitespaces)
+        return !signoff.isEmpty && signoffProven(signoff, contested: contested)
     }
 
     /// Fallback narration when the profile predates reveal_script (framed by the fixed chrome).
@@ -113,7 +159,9 @@ struct StyleRevealView: View {
         var out: [Card] = []
         for line in template.profile.verbalStyle.recurringLines where line.confirmation == nil {
             let quote = line.quote.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !quote.isEmpty else { continue }
+            // M1 gate: only ask "say it every video?" about a line we can PROVE recurs. Unproven lines are
+            // NOT discarded — they stay in the profile (unconfirmed) for a later learn to promote (M2).
+            guard !quote.isEmpty, lineProven(line, contested: contested) else { continue }
             let isContested = contested.contains(line.key)
             let eyebrow: String = {
                 if isContested { return "STILL YOUR THING?" }
@@ -125,18 +173,23 @@ struct StyleRevealView: View {
                 default:         return "YOUR LINE"
                 }
             }()
-            let detail = isContested ? "Didn't hear it in the new videos." : line.deliveryNote
+            // Honest count over the one-off delivery note — the evidence is the whole point of the ask.
+            let detail: String
+            if isContested { detail = "Didn't hear it in the new videos." }
+            else if line.evidenceCount >= 2 && template.count >= 2 { detail = "Heard in \(line.evidenceCount) of your \(template.count) videos." }
+            else { detail = line.deliveryNote }
             out.append(Card(kind: .line(line.id), eyebrow: eyebrow, quote: quote,
                             detail: detail, key: line.key))
         }
         let vs = template.profile.verbalStyle
         let signoff = vs.signoff.trimmingCharacters(in: .whitespacesAndNewlines)
-        if vs.signoffConfirmation == nil, !signoff.isEmpty,
+        if vs.signoffConfirmation == nil, !signoff.isEmpty, signoffProven(signoff, contested: contested),
            !out.contains(where: { $0.quote.lowercased() == signoff.lowercased() }),
            !template.profile.verbalStyle.recurringLines.contains(where: { $0.role == "sign-off" && $0.confirmation != nil }) {
             let isContested = contested.contains("__signoff__")
             out.append(Card(kind: .signoff, eyebrow: isContested ? "STILL YOUR THING?" : "YOUR SIGN-OFF",
-                            quote: signoff, detail: isContested ? "Didn't hear it in the new videos." : "",
+                            quote: signoff,
+                            detail: isContested ? "Didn't hear it in the new videos." : "Heard in \(signoffHits(signoff)) of your \(template.count) videos.",
                             key: "__signoff__"))
         }
         let rating = vs.ratingFormat.trimmingCharacters(in: .whitespacesAndNewlines)

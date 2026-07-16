@@ -1199,9 +1199,13 @@ struct PolishView: View {
                 seekPlayerOnly(to: playheadTime)
             }
             .onEnded { v in
+                let didScrub = scrubbing
                 scrubbing = false
-                // Coast on the release velocity (scrollX moves opposite the finger). A gentle lift with
-                // no real flick falls below the cutoff and lands exactly, so precise scrubs still work.
+                // Only coast on a real scrub. A two-finger pinch also ends this drag, but its onChanged
+                // was skipped (so `didScrub` stayed false) — without this guard the pinch's release
+                // velocity would fling the timeline. A gentle lift with no flick falls below the cutoff
+                // and lands exactly, so precise scrubs still work.
+                guard didScrub, !zooming, !lifting, !narration.isBusy else { return }
                 startMomentum(velocity: -v.velocity.width)
             }
     }
@@ -2670,6 +2674,7 @@ struct PolishView: View {
 
     private func teardown() {
         narration.stop()   // leaving the page stops-and-keeps any in-flight take
+        momentum.stop()    // a fling in progress must not keep coasting/seeking after we leave
         if let timeObserver { player.removeTimeObserver(timeObserver); self.timeObserver = nil }
         player.pause()
     }
