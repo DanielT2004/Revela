@@ -150,6 +150,10 @@ final class AuthStore {
         user = nil
         persist()
         UserDefaults.standard.removeObject(forKey: Self.hasOnboardedKey)
+        // Re-arm the in-editor one-shot teaching moments too, so a reset replays the FULL
+        // first-run experience (the "How Vela works" pages themselves keep no persistent state).
+        UserDefaults.standard.removeObject(forKey: "veFirstDeckHints")     // Sort deck teaching line
+        UserDefaults.standard.removeObject(forKey: "velaTrimCoachShown")   // trim-bar coach line
         Log.app("🍳 AuthStore reset for testing — next launch shows onboarding.")
     }
 

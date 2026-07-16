@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// First-run onboarding. One router screen that owns its own linear `step` machine:
-/// 0 Welcome → 1 Sign up → 2 Connect → 3 Analyzing → 4 The Reveal → 5 Style profile → enter the app.
+/// 0 Welcome → 1 How Vela works → 2 Sign up → 3 Connect → 4 Analyzing → 5 The Reveal →
+/// 6 Style profile → enter the app.
 struct OnboardingView: View {
     @Environment(AppRouter.self) private var router
     @Environment(AuthStore.self) private var auth
@@ -21,26 +22,29 @@ struct OnboardingView: View {
                 case 0:
                     WelcomeStepView { goTo(1) }
                 case 1:
-                    SignUpStepView { goTo(2) }
+                    // "How Vela works" — value before friction. Completes AND skips into sign-up.
+                    HowItWorksView { goTo(2) }
                 case 2:
-                    ConnectStepView(onBack: { goTo(1) }, onContinue: { goTo(3) }, onSkip: { skipAndEnter() })
+                    SignUpStepView { goTo(3) }
                 case 3:
+                    ConnectStepView(onBack: { goTo(2) }, onContinue: { goTo(4) }, onSkip: { skipAndEnter() })
+                case 4:
                     AnalyzingStepView(
                         coordinator: styleCoordinator,
                         clips: session.clips,
-                        onDone: { template in analyzedTemplate = template; goTo(4) },
-                        onBack: { goTo(2) }
+                        onDone: { template in analyzedTemplate = template; goTo(5) },
+                        onBack: { goTo(3) }
                     )
-                case 4:
+                case 5:
                     // The Reveal — the feel-heard moment between analysis and the editable template.
                     if analyzedTemplate != nil {
                         StyleRevealView(
                             template: Binding($analyzedTemplate)!,
                             firstName: auth.firstName,
-                            onDone: { goTo(5) }
+                            onDone: { goTo(6) }
                         )
                     } else {
-                        Color.veCream  // shouldn't happen; step 4 only follows a successful analysis
+                        Color.veCream  // shouldn't happen; step 5 only follows a successful analysis
                     }
                 default:
                     if analyzedTemplate != nil {
@@ -51,7 +55,7 @@ struct OnboardingView: View {
                             onSave: { saveAndEnter() }
                         )
                     } else {
-                        Color.veCream  // shouldn't happen; step 5 only follows a successful analysis
+                        Color.veCream  // shouldn't happen; step 6 only follows a successful analysis
                     }
                 }
             }
@@ -62,7 +66,7 @@ struct OnboardingView: View {
         // Kill recovery: if the app was closed mid-style-learn during onboarding, re-attach to the server
         // job on relaunch and jump to the Analyzing step — which polls to completion and advances to review.
         .task {
-            if styleCoordinator.resumeIfPending() { step = 3 }
+            if styleCoordinator.resumeIfPending() { step = 4 }
         }
     }
 
