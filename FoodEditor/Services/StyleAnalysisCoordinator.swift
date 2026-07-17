@@ -35,12 +35,15 @@ final class StyleAnalysisCoordinator {
     /// backgrounds. Mirrors `AnalysisCoordinator.isCompressing`.
     var isCompressing: Bool { phase == .running && stage == .compressing }
 
-    /// "Free to go" — style proxies are small and each upload rides a `BackgroundActivity` assertion
-    /// (~30s grace), so unlike the edit pipeline only the COMPRESS step pins the app open. False at
+    /// "Free to go" — true only once EVERY video's job is handed to the server (`stage == .watching`
+    /// onward), so the promise never lies. It used to flip at `.uploading` (all clips COMPRESSED), but
+    /// an upload only rides a ~30s `BackgroundActivity` grace: leaving mid-upload could strand a clip
+    /// that never reaches the server, stalling the batch with no push. Compress AND upload both pin the
+    /// app open now; the affordance appears the moment the work is genuinely server-side. False at
     /// `.idle` so the leave pill's first frame is never a sage flash that flips backward to ochre.
     var canLeave: Bool {
         switch phase {
-        case .running: return stage != .compressing
+        case .running: return stage == .watching || stage == .synthesizing
         case .done:    return true
         default:       return false
         }
@@ -281,7 +284,7 @@ final class StyleAnalysisCoordinator {
             if Task.isCancelled { return }
             let jobIds = ordered.map(\.1)
             jobStarted = true   // from here a timeout means "still running server-side", not a hard failure
-            stage = .watching   // all jobs handed off — the work is server-side now (canLeave already true)
+            stage = .watching   // all jobs handed off — the work is server-side now; canLeave flips true HERE
             progress = 0.5
 
             // Persist ALL jobs so a kill mid-poll can recover the whole submission on relaunch — mirrors

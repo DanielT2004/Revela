@@ -21,6 +21,7 @@ struct ProfileView: View {
     @State private var projectCount = 0
     @State private var exportedCount = 0
     @State private var notifStatus: UNAuthorizationStatus?
+    @State private var showTour = false
 
     var body: some View {
         ScrollView {
@@ -31,8 +32,9 @@ struct ProfileView: View {
                 styleRow.padding(.top, 12).cascade(appeared, 3)
                 statsRow.padding(.top, 12).cascade(appeared, 4)
                 notificationsCard.padding(.top, 12).cascade(appeared, 5)
-                feedbackCard.padding(.top, 22).cascade(appeared, 6)
-                footer.padding(.top, 26).cascade(appeared, 7)
+                tourRow.padding(.top, 12).cascade(appeared, 6)
+                feedbackCard.padding(.top, 22).cascade(appeared, 7)
+                footer.padding(.top, 26).cascade(appeared, 8)
             }
             .padding(.horizontal, 22).padding(.top, 60).padding(.bottom, 40)
         }
@@ -302,6 +304,36 @@ struct ProfileView: View {
     }
 
     // MARK: beta feedback
+
+    /// Replay the onboarding tour any time — the lesson is never one-shot. Full-screen cover
+    /// (not a sheet): the demo's hook/B-roll swipes are vertical and would fight a vertical
+    /// drag-to-dismiss; "Done"/"Got it" are the exits.
+    private var tourRow: some View {
+        Button { showTour = true } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "questionmark.circle")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Color.veTerracotta)
+                    .frame(width: 34, height: 34)
+                    .background(Color.veTerracotta.opacity(0.10), in: Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("How Vela works")
+                        .font(VeFont.sans(14.5, weight: .semibold)).foregroundStyle(Color.veCharcoal)
+                    Text("Replay the quick tour — the swipes, your cut, your style")
+                        .font(VeFont.sans(12)).foregroundStyle(Color.veWarmGray)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.veFaintGray)
+            }
+            .padding(14)
+            .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .fullScreenCover(isPresented: $showTour) {
+            HowItWorksView(mode: .replay) { showTour = false }
+        }
+    }
 
     private var feedbackCard: some View {
         VStack(alignment: .leading, spacing: 0) {
