@@ -1,0 +1,124 @@
+<!doctype html>
+<!--
+  Vela — Privacy Policy
+  TEMPLATE — review before publishing. Fill every [BRACKETED] placeholder and have it
+  reviewed by counsel if you can. This is a good-faith, accurate description of how the
+  app handles data as of the current build; it is not legal advice.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vela — Privacy Policy</title>
+<style>
+  :root { color-scheme: light; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6; color: #2E2A26; background: #F7F3EC;
+    max-width: 720px; margin: 0 auto; padding: 40px 22px 80px;
+  }
+  h1 { font-size: 1.9rem; margin: 0 0 4px; }
+  h2 { font-size: 1.2rem; margin: 34px 0 8px; }
+  .updated { color: #8A8178; font-size: 0.95rem; margin-bottom: 28px; }
+  a { color: #B5654A; }
+  ul { padding-left: 20px; }
+  li { margin: 4px 0; }
+  code { background: #EDE7DC; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
+  .note { background: #F4EFE6; border-left: 3px solid #B5654A; padding: 12px 16px; border-radius: 6px; color: #6E665C; font-size: 0.95rem; }
+  footer { margin-top: 48px; color: #A89F90; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+
+<h1>Privacy Policy</h1>
+<div class="updated">For the Vela app &middot; Last updated 21 July 2026</div>
+
+<p>
+  This policy explains what information the Vela app (&ldquo;Vela,&rdquo; &ldquo;we,&rdquo; &ldquo;us&rdquo;)
+  collects, why, and what choices you have. Vela is an AI-assisted video editor for short-form
+  creators. It is operated by <strong>[DEVELOPER / COMPANY LEGAL NAME]</strong>. If you have
+  questions, contact us at <a href="mailto:daniel.t7504@gmail.com">daniel.t7504@gmail.com</a>.
+</p>
+
+<h2>The short version</h2>
+<ul>
+  <li>To edit a video, Vela uploads a compressed copy of your footage to <strong>Google&rsquo;s Gemini API</strong> for analysis. This is core to how the app works.</li>
+  <li>You sign in with <strong>Sign in with Apple</strong>. We store a Supabase account tied to your Apple identifier so we can track your usage against your plan.</li>
+  <li>We do <strong>not</strong> sell your data or use your footage to train our own models.</li>
+  <li>You can <strong>delete your account and all associated data</strong> from inside the app at any time.</li>
+</ul>
+
+<h2>Information we collect</h2>
+<ul>
+  <li><strong>Account identity.</strong> When you use Sign in with Apple, we receive an Apple user identifier and, on first sign-in, the name and email you choose to share (your email may be an Apple private-relay address). We create a corresponding user record in our backend.</li>
+  <li><strong>Your video and audio content.</strong> The footage you choose to edit, and audio you record for voiceover. A compressed proxy of your footage is uploaded for AI analysis (see &ldquo;How your footage is processed&rdquo;). Speech in your video is transcribed <em>on your device</em> to align edits to word boundaries.</li>
+  <li><strong>Usage and cost data.</strong> We record how many edits and style analyses you run and the AI token counts they consume, to enforce plan limits and prevent abuse.</li>
+  <li><strong>Device notification token.</strong> If you enable notifications, we store an Apple Push Notification token so we can tell you when a long analysis or export finishes.</li>
+  <li><strong>Diagnostics.</strong> Basic technical logs needed to operate and debug the service.</li>
+</ul>
+<p class="note">
+  Vela does not include third-party advertising or analytics SDKs, and does not track you across
+  other apps or websites.
+</p>
+
+<h2>How your footage is processed</h2>
+<p>
+  When you ask Vela to analyze or edit a video, a compressed <strong>proxy</strong> copy is uploaded
+  to Google&rsquo;s Gemini API, which returns a structured &ldquo;edit plan&rdquo; describing suggested cuts.
+  The final, full-resolution video is assembled <strong>on your device</strong> and saved to your
+  camera roll only when you choose to export. Voice-isolation for voiceover audio is processed by
+  <strong>ElevenLabs</strong>. These providers act as our processors for the purpose of delivering
+  the feature you requested; we do not authorize them to use your content for their own purposes.
+</p>
+
+<h2>Who we share information with</h2>
+<p>We share information only with service providers that help us run the app:</p>
+<ul>
+  <li><strong>Google (Gemini API)</strong> &mdash; AI analysis of your uploaded video proxy.</li>
+  <li><strong>Apple</strong> &mdash; Sign in with Apple, and push notification delivery.</li>
+  <li><strong>Supabase</strong> &mdash; our backend: authentication, database, and server functions.</li>
+  <li><strong>ElevenLabs</strong> &mdash; voice isolation for recorded voiceover.</li>
+</ul>
+<p>We do not sell personal information.</p>
+
+<h2>Retention</h2>
+<p>
+  Uploaded video proxies are transient and are used to produce your edit plan; analysis job records
+  are automatically cleaned up shortly after they complete. Your account record and usage counts are
+  retained while your account exists. When you delete your account, we delete your account record,
+  your job records, and your usage data.
+</p>
+
+<h2>Your choices and rights</h2>
+<ul>
+  <li><strong>Delete your account.</strong> Use the &ldquo;Delete account&rdquo; option in the app&rsquo;s profile screen. This removes your account and associated data from our backend.</li>
+  <li><strong>Permissions.</strong> Photo library, microphone, and speech-recognition access are requested only for the features that need them, and can be changed in iOS Settings.</li>
+  <li><strong>Access or questions.</strong> Email <a href="mailto:daniel.t7504@gmail.com">daniel.t7504@gmail.com</a> and we will respond as required by applicable law such as GDPR/CCPA where relevant.</li>
+</ul>
+
+<h2>Children</h2>
+<p>
+  Vela is not directed to children under 13 (or the minimum age required in your country), and we do
+  not knowingly collect their personal information.
+</p>
+
+<h2>Changes</h2>
+<p>
+  We may update this policy as the app evolves. Material changes will be reflected here with a new
+  &ldquo;last updated&rdquo; date.
+</p>
+
+<h2>Contact</h2>
+<p>
+  <strong>[DEVELOPER / COMPANY LEGAL NAME]</strong><br>
+  [MAILING ADDRESS, if required in your jurisdiction]<br>
+  <a href="mailto:daniel.t7504@gmail.com">daniel.t7504@gmail.com</a>
+</p>
+
+<footer>
+  This document is a template provided to help you publish an accurate policy. It is not legal
+  advice; consider having it reviewed before your public launch.
+</footer>
+
+</body>
+</html>

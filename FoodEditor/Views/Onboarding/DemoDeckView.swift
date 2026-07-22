@@ -22,7 +22,8 @@ struct DemoDeckView: View {
     // The mini timeline (the "behind the scenes" state).
     @State private var spine: [SpineTile] = []      // lane 1 — the cut, in order
     @State private var brollLane: [SpineTile] = []  // lane 2 — overlays
-    @State private var setAside = 0                 // the tray
+    @State private var setAside = 0                 // the trash count
+    @State private var cutFlight: SpineTile?        // transient: the clip flying into the trash
     @State private var coachLine: String?
 
     /// The fixed teaching sequence: simple verbs first, the two wow verbs last.
@@ -63,7 +64,8 @@ struct DemoDeckView: View {
             .offset(y: deckIn ? 0 : 24)
 
             // ── the timeline: what the swipes are doing behind the scenes ──
-            SpineStripView(spine: spine, brollLane: brollLane, setAside: setAside, total: cards.count)
+            SpineStripView(spine: spine, brollLane: brollLane, setAside: setAside,
+                           cutFlight: cutFlight, total: cards.count)
 
             // ── the coach line narrating the last move ──
             ZStack {
@@ -138,6 +140,11 @@ struct DemoDeckView: View {
             }
             withAnimation(.easeOut(duration: 0.3)) { coachLine = action.coachLine }
             UIAccessibility.post(notification: .announcement, argument: action.coachLine)
+            if action == .cut {
+                // The clip visibly flies into the trash can at the strip's trailing edge.
+                cutFlight = tile
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { cutFlight = nil }
+            }
             if index >= cards.count && !finished {
                 finished = true
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -237,7 +244,7 @@ private enum DemoAction: CaseIterable {
     var coachLine: String {
         switch self {
         case .keep:  return "Added to your cut."
-        case .cut:   return "Set aside — never deleted, tomorrow's B-roll."
+        case .cut:   return "Cut. It waits in the tray — nothing's ever deleted."
         case .hook:  return "Your new opener — moved to the very front."
         case .broll: return "Layered over the cut — it plays while your voice continues."
         }
@@ -387,12 +394,24 @@ private struct SpineStripView: View {
     let spine: [SpineTile]
     let brollLane: [SpineTile]
     let setAside: Int
+    let cutFlight: SpineTile?
     let total: Int
 
     private var emptySlots: Int { max(0, total - spine.count - brollLane.count - setAside) }
     private var changeKey: String { "\(spine.map(\.id))-\(brollLane.count)-\(setAside)" }
 
     var body: some View {
+        ZStack(alignment: .topTrailing) {
+            stripBody
+            // The cut clip arcs into the trash — deletion made explicit (it still waits
+            // in the tray in the real app; the coach line says so).
+            if let f = cutFlight {
+                CutFlightTile(tone: f.tone).id(f.id)
+            }
+        }
+    }
+
+    private var stripBody: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack {
                 Text("YOUR CUT")
@@ -401,8 +420,10 @@ private struct SpineStripView: View {
                 Spacer()
                 if setAside > 0 {
                     HStack(spacing: 5) {
-                        Image(systemName: "scissors").font(.system(size: 9, weight: .bold))
-                        Text("Set aside · \(setAside)").font(VeFont.sans(11, weight: .bold))
+                        Image(systemName: "trash.fill")
+                            .font(.system(size: 10, weight: .bold))
+                            .symbolEffect(.bounce, value: setAside)
+                        Text("\(setAside)").font(VeFont.sans(11, weight: .bold))
                     }
                     .foregroundStyle(Color.veNoteText)
                     .padding(.horizontal, 10).padding(.vertical, 5)
@@ -463,5 +484,21 @@ private struct SpineStripView: View {
             .frame(height: 46, alignment: .center)
         }
         .animation(.spring(response: 0.5, dampingFraction: 0.78), value: changeKey)
+    }
+}
+
+/// The transient mini clip that shrinks into the trash chip after a cut-swipe.
+private struct CutFlightTile: View {
+    let tone: FoodTone
+    @State private var flown = false
+
+    var body: some View {
+        FoodTile(tone: tone, cornerRadius: 7)
+            .frame(width: 30, height: 46)
+            .scaleEffect(flown ? 0.15 : 1)
+            .opacity(flown ? 0 : 1)
+            .offset(x: flown ? -8 : -170, y: flown ? 6 : 52)
+            .onAppear { withAnimation(.easeIn(duration: 0.45)) { flown = true } }
+            .allowsHitTesting(false)
     }
 }
